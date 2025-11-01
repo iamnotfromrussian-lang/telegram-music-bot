@@ -37,3 +37,4 @@
 1. Форкни или клонируй репозиторий:
    ```bash
    git clone https://github.com/iamnotfromrussian-lang/telegram-music-bot.git
+ 
