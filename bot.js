@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (anti-dup UI + temporary play + clean messages)
+// bot.js — Telegram Music Bot (anti-dup + pagination fix + auto-restart)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -38,25 +38,27 @@ function safeSave() {
   catch (e) { console.error('⚠️ Ошибка сохранения:', e.message); }
 }
 
-// состояние пагинации: userId -> { title, page }
+// состояние пагинации: userId -> { key, page }
 const paginationState = new Map();
 
 // «временные показы» аудио: userId -> { trackId, msgIds: number[] }
 const tempPlays = new Map();
 
 // ────────────────────────────────
-// Веб-стаб для рендер/хэлсчека
+// Веб-сервер (для Render health check)
 // ────────────────────────────────
 const app = express();
 app.get('/', (_, res) => res.send('✅ Telegram Music Bot активен'));
 app.listen(PORT, () => console.log(`🌐 Сервер запущен на порту ${PORT}`));
 
 // ────────────────────────────────
+// Основной бот
+// ────────────────────────────────
 const bot = new Telegraf(BOT_TOKEN);
 
-// утилиты
 const LIKE_EFFECTS = ['💞', '💫', '💥', '💎', '🔥'];
 const likeEffect = () => LIKE_EFFECTS[Math.floor(Math.random() * LIKE_EFFECTS.length)];
+
 const mainMenu = Markup.keyboard([
   ['📋 Список треков', '🎧 Мои треки'],
   ['📀 Оригинальные', '🎤 Кавер-версии'],
@@ -64,7 +66,6 @@ const mainMenu = Markup.keyboard([
   ['📊 Статистика']
 ]).resize();
 
-const delay = (ms) => new Promise(res => setTimeout(res, ms));
 function deleteLater(ctx, msg, delayMs = 1500) {
   if (!msg) return;
   setTimeout(() => ctx.telegram.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), delayMs);
@@ -73,75 +74,99 @@ function deleteLater(ctx, msg, delayMs = 1500) {
 function likeBar(track, userId) {
   const liked = track.voters?.includes(userId);
   const text = `❤️ ${track.voters.length} — ${track.title}`;
-  const row = [
-    Markup.button.callback(liked ? '💔 Убрать лайк' : '❤️ Поставить лайк', `like_${track.id}`)
-  ];
+  const row = [Markup.button.callback(liked ? '💔 Убрать лайк' : '❤️ Поставить лайк', `like_${track.id}`)];
   if (isAdmin(userId)) row.push(Markup.button.callback('🗑 Удалить', `del_${track.id}`));
   return { text, keyboard: Markup.inlineKeyboard([row]) };
 }
 
-// списки + пагинация
+// ────────────────────────────────
+// Пагинация (исправленная)
+// ────────────────────────────────
+function getListKey(title) {
+  if (title.includes('📋')) return 'all';
+  if (title.includes('🎧')) return 'mine';
+  if (title.includes('📀')) return 'orig';
+  if (title.includes('🎤')) return 'cover';
+  if (title.includes('🌍')) return 'global';
+  if (title.includes('🏆')) return 'week';
+  return 'all';
+}
+
+function pickListByKey(key, userId) {
+  switch (key) {
+    case 'mine': return trackList.filter(t => t.userId === userId);
+    case 'orig': return trackList.filter(t => t.type === 'original');
+    case 'cover': return trackList.filter(t => t.type === 'cover');
+    case 'global': return [...trackList].sort((a, b) => b.voters.length - a.voters.length);
+    case 'week': {
+      const weekAgo = Date.now() - 7 * 86400000;
+      return trackList.filter(t => new Date(t.createdAt).getTime() >= weekAgo)
+                      .sort((a, b) => b.voters.length - a.voters.length);
+    }
+    default: return trackList;
+  }
+}
+
 async function showTracks(ctx, list, title, page = 1) {
   const perPage = 10;
   const totalPages = Math.max(1, Math.ceil(list.length / perPage));
   page = Math.min(Math.max(1, page), totalPages);
 
-  paginationState.set(String(ctx.from.id), { title, page });
+  const key = getListKey(title);
+  paginationState.set(String(ctx.from.id), { key, page });
+
   if (!list.length) return ctx.reply('Список пуст.', mainMenu);
 
   const start = (page - 1) * perPage;
   const slice = list.slice(start, start + perPage);
 
-  const buttons = slice.map(t => [
-    Markup.button.callback(`▶️ ${t.title} • ❤️ ${t.voters.length}`, `play_${t.id}`)
-  ]);
+  const buttons = slice.map(t => [Markup.button.callback(`▶️ ${t.title} • ❤️ ${t.voters.length}`, `play_${t.id}`)]);
   const nav = [];
-  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${encodeURIComponent(title)}_${page - 1}`));
-  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${encodeURIComponent(title)}_${page + 1}`));
+  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
+  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
   if (nav.length) buttons.push(nav);
 
-  const header = `${title} (страница ${page} из ${totalPages})`;
+  const header = `${title} (стр. ${page}/${totalPages})`;
   await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
 }
-function pickList(title, userId) {
-  if (title.includes('📋')) return trackList;
-  if (title.includes('🎧')) return trackList.filter(t => t.userId === userId);
-  if (title.includes('📀')) return trackList.filter(t => t.type === 'original');
-  if (title.includes('🎤')) return trackList.filter(t => t.type === 'cover');
-  if (title.includes('🌍')) return [...trackList].sort((a, b) => b.voters.length - a.voters.length);
-  if (title.includes('🏆')) {
-    const weekAgo = Date.now() - 7 * 86400000;
-    return trackList
-      .filter(t => new Date(t.createdAt).getTime() >= weekAgo)
-      .sort((a, b) => b.voters.length - a.voters.length);
-  }
-  return trackList;
-}
+
 async function refreshPagination(ctx) {
   const state = paginationState.get(String(ctx.from.id));
   if (!state) return;
-  const { title, page } = state;
-  const list = pickList(title, ctx.from.id);
-  await showTracks(ctx, list, title, page);
+  const { key, page } = state;
+  const list = pickListByKey(key, ctx.from.id);
+  const titleMap = {
+    all: '📋 Список треков',
+    mine: '🎧 Твои треки',
+    orig: '📀 Оригинальные',
+    cover: '🎤 Кавер-версии',
+    global: '🌍 Топ за всё время',
+    week: '🏆 Топ за неделю'
+  };
+  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
 }
 
-async function updateAllLikeBars(ctx, track) {
-  for (const m of track.messages || []) {
-    try {
-      const { text, keyboard } = likeBar(track, ctx.from.id);
-      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
-        reply_markup: keyboard.reply_markup
-      });
-    } catch {}
-  }
-}
+bot.action(/^page_(.+)_(\d+)$/, async (ctx) => {
+  const key = ctx.match[1];
+  const page = parseInt(ctx.match[2]);
+  const list = pickListByKey(key, ctx.from.id);
+  const titleMap = {
+    all: '📋 Список треков',
+    mine: '🎧 Твои треки',
+    orig: '📀 Оригинальные',
+    cover: '🎤 Кавер-версии',
+    global: '🌍 Топ за всё время',
+    week: '🏆 Топ за неделю'
+  };
+  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
+  await ctx.answerCbQuery();
+});
 
 // ────────────────────────────────
 // Команды
 // ────────────────────────────────
 bot.start(ctx => ctx.reply(
-  '🎵 Привет! Отправь аудио — добавлю в плейлист.\n\n' +
-  'ℹ️ Можно загружать до 100 МБ. Используй меню ниже для навигации.',
+  '🎵 Привет! Отправь аудио — добавлю в плейлист.\n\nℹ️ Можно загружать до 100 МБ. Используй меню ниже для навигации.',
   mainMenu
 ));
 
@@ -164,14 +189,13 @@ bot.hears('🏆 Топ за неделю', ctx => {
 });
 
 // ────────────────────────────────
-// Приём аудио (без дубликатов и без копий аудио от бота)
+// Приём аудио
 // ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
   try {
     const file = ctx.message.audio || ctx.message.document;
     if (!file) return;
 
-    // антидубль по file_id / file_unique_id
     const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
     if (exists) {
       const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
@@ -191,18 +215,13 @@ bot.on(['audio', 'document'], async (ctx) => {
       voters: [],
       createdAt: new Date().toISOString(),
       type: 'original',
-      messages: [
-        // исходное сообщение пользователя (может не удалиться в приватном чате)
-        { chatId: ctx.chat.id, messageId: ctx.message.message_id }
-      ]
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
     };
 
-    // короткое уведомление — временное
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
 
-    // выбор типа (тоже удалим после выбора)
     const typeMsg = await ctx.reply(
       'Выбери тип трека:',
       Markup.inlineKeyboard([
@@ -212,7 +231,6 @@ bot.on(['audio', 'document'], async (ctx) => {
     );
     track.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
 
-    // одна-единственная плашка лайка
     const { text, keyboard } = likeBar(track, ctx.from.id);
     const likeMsg = await ctx.reply(text, keyboard);
     track.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
@@ -226,7 +244,7 @@ bot.on(['audio', 'document'], async (ctx) => {
 });
 
 // ────────────────────────────────
-// Действия
+// Inline-действия (лайки / удаление / тип)
 // ────────────────────────────────
 bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   const [, id, type] = ctx.match;
@@ -235,13 +253,9 @@ bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   tr.type = type;
   safeSave();
 
-  // заменяем текст в сообщении выбора и через секунду удаляем его
   await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
   const ok = await ctx.reply('✔️ Сохранено');
   deleteLater(ctx, ok, 1000);
-  // попытка удалить сообщение выбора
-  try { await ctx.telegram.deleteMessage(ctx.chat.id, ctx.callbackQuery.message.message_id); } catch {}
-
   await ctx.answerCbQuery();
 });
 
@@ -263,7 +277,14 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   }
   deleteLater(ctx, toast, 1200);
   safeSave();
-  updateAllLikeBars(ctx, tr);
+  for (const m of tr.messages || []) {
+    try {
+      const { text, keyboard } = likeBar(tr, ctx.from.id);
+      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+    } catch {}
+  }
   await ctx.answerCbQuery();
 });
 
@@ -275,7 +296,6 @@ bot.action(/^del_(.+)$/, async (ctx) => {
   if (idx === -1) return ctx.answerCbQuery('Не найден');
   const tr = trackList[idx];
 
-  // удалить ВСЕ сообщения бота по треку (и попробовать исходное пользователя)
   for (const m of tr.messages || []) {
     await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
   }
@@ -285,20 +305,16 @@ bot.action(/^del_(.+)$/, async (ctx) => {
 
   const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
   deleteLater(ctx, info, 1800);
-
-  // обновим текущую страницу списка
   await refreshPagination(ctx);
   await ctx.answerCbQuery('Удалено');
 });
 
-// Воспроизведение из списка — ВРЕМЕННОЕ сообщение, автоудаление, без бесконечных дублей
 bot.action(/^play_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   const tr = trackList.find(t => t.id === id);
   if (!tr) return ctx.answerCbQuery('Не найден');
 
   const uid = String(ctx.from.id);
-  // если у пользователя уже есть временный показ — удалить его
   const prev = tempPlays.get(uid);
   if (prev && prev.msgIds?.length) {
     for (const mid of prev.msgIds) {
@@ -307,18 +323,13 @@ bot.action(/^play_(.+)$/, async (ctx) => {
     tempPlays.delete(uid);
   }
 
-  // скопируем исходное сообщение с аудио (играбельно), и поставим временную плашку лайка под ним
-  // (оригинальный messageId — первый в массиве messages)
   const origin = (tr.messages || [])[0];
   let newIds = [];
   try {
     if (origin) {
-      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, {
-        caption: tr.title
-      });
+      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
       newIds.push(cp.message_id);
     } else {
-      // на всякий — если по какой-то причине origin нет
       const fallback = await ctx.reply(`▶️ ${tr.title}`);
       newIds.push(fallback.message_id);
     }
@@ -327,7 +338,6 @@ bot.action(/^play_(.+)$/, async (ctx) => {
     newIds.push(likeMsg.message_id);
   } catch {}
 
-  // запомним и настроим автоудаление через 60 сек
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
   setTimeout(async () => {
     const cur = tempPlays.get(uid);
@@ -337,16 +347,20 @@ bot.action(/^play_(.+)$/, async (ctx) => {
       }
       tempPlays.delete(uid);
     }
-  }, 10000);
+  }, 60000);
 
   await ctx.answerCbQuery();
 });
 
 // ────────────────────────────────
-// Глобальный catch
+// Глобальный catch + авто-перезапуск
 // ────────────────────────────────
 bot.catch(err => {
   console.error('⚠️ Ошибка:', err.code || err.message);
+  if (['ECONNRESET', 'ETIMEDOUT', 'EFATAL'].includes(err.code)) {
+    console.log('🌐 Потеря соединения. Перезапуск через 10 секунд...');
+    setTimeout(() => process.exit(1), 10000);
+  }
 });
 
 // ────────────────────────────────
@@ -354,5 +368,5 @@ bot.catch(err => {
 // ────────────────────────────────
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM')); 
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
 
