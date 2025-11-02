@@ -244,7 +244,7 @@ bot.on(['audio', 'document'], async (ctx) => {
 });
 
 // ────────────────────────────────
-// Inline-действия (лайки / удаление / тип / проигрывание)
+// Inline-действия (лайки / удаление / тип)
 // ────────────────────────────────
 bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   const [, id, type] = ctx.match;
@@ -252,6 +252,7 @@ bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   if (!tr) return ctx.answerCbQuery('Не найден');
   tr.type = type;
   safeSave();
+
   await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
   const ok = await ctx.reply('✔️ Сохранено');
   deleteLater(ctx, ok, 1000);
@@ -289,13 +290,19 @@ bot.action(/^like_(.+)$/, async (ctx) => {
 
 bot.action(/^del_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
+
   const id = ctx.match[1];
   const idx = trackList.findIndex(t => t.id === id);
   if (idx === -1) return ctx.answerCbQuery('Не найден');
   const tr = trackList[idx];
-  for (const m of tr.messages || []) await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
+
+  for (const m of tr.messages || []) {
+    await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
+  }
+
   trackList.splice(idx, 1);
   safeSave();
+
   const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
   deleteLater(ctx, info, 1800);
   await refreshPagination(ctx);
@@ -332,7 +339,15 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   } catch {}
 
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
-  // ❌ Удалён блок автоудаления через 60000 мс (треки больше не исчезают)
+  setTimeout(async () => {
+    const cur = tempPlays.get(uid);
+    if (cur && cur.trackId === tr.id) {
+      for (const mid of cur.msgIds) {
+        try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
+      }
+      tempPlays.delete(uid);
+    }
+  }, 60000);
 
   await ctx.answerCbQuery();
 });
