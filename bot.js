@@ -321,34 +321,39 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   }
 
   deleteLater(ctx, toast, 1200);
-  safeSave();
-  
+  safeSave(); // 👈 Сохраняем изменение в файле
+
+  // Генерируем новый текст и кнопки
   const { text, keyboard } = likeBar(tr, ctx.from.id);
   
-  // 1. Устойчивое обновление ПОСТОЯННЫХ лайк-панелей (tr.messages)
+  // 1. Обновление ПОСТОЯННЫХ лайк-панелей (tr.messages)
   const updatedMessages = [];
   for (const m of tr.messages || []) {
     try {
-      // Пытаемся редактировать только лайк-панели и служебные сообщения.
-      // Оригинальное аудио (первый элемент) не редактируем.
-      if (m.messageId !== tr.messages[0]?.messageId) {
-        await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
+      // Пытаемся редактировать только сообщения с лайк-панелью.
+      // Мы знаем, что лайк-панели - это текстовые сообщения, а не аудио/документы.
+      
+      // Попытка редактировать как текстовое сообщение:
+      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
           reply_markup: keyboard.reply_markup
-        });
-      }
-      updatedMessages.push(m); // Сообщение успешно обновлено (или это аудио, которое не редактировали)
+      });
+      updatedMessages.push(m);
     } catch (e) {
-      const errMsg = String(e.message);
-      // Игнорируем ошибку, если сообщение не найдено или не модифицировано
-      if (!errMsg.includes('message to edit not found') && !errMsg.includes('message is not modified')) {
-        console.error('Ошибка обновления постоянной лайк-панели:', e.message);
-        updatedMessages.push(m); 
-      }
+      const errMsg = String(e.message);
+      // Если это ошибка "message is not modified" - это нормально.
+      // Если это ошибка "message to edit not found" (пользователь удалил) - игнорируем.
+      if (errMsg.includes('message is not a text message') && m.messageId === tr.messages[0]?.messageId) {
+          // Если это оригинальное аудио, мы его не редактируем, но ссылку оставляем.
+          updatedMessages.push(m); 
+      } else if (!errMsg.includes('message to edit not found') && !errMsg.includes('message is not modified')) {
+          console.error('Ошибка обновления постоянной лайк-панели:', e.message);
+          updatedMessages.push(m);
+      }
     }
   }
   tr.messages = updatedMessages; // Обновляем список, удаляя несуществующие сообщения
 
-  // 2. Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
+  // 2. Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays), вызванных через кнопку "Play"
   const tempState = tempPlays.get(uid);
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
     // Временное сообщение с лайк-панелью — это последнее сообщение в msgIds
@@ -445,6 +450,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
