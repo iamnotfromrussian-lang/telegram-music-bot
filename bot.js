@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (anti-dup + pagination fix + auto-restart)
+// bot.js — Telegram Music Bot (финальная версия: анти-дубли, пагинация, лайки без дублей, авто-рестарт)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -16,7 +16,9 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 const ADMIN_IDS = (process.env.ADMIN_IDS || '1100564590')
-  .split(',').map(id => id.trim()).filter(Boolean);
+  .split(',')
+  .map(id => id.trim())
+  .filter(Boolean);
 const isAdmin = (id) => ADMIN_IDS.includes(String(id));
 
 const PORT = process.env.PORT || 3000;
@@ -29,30 +31,35 @@ let trackList = [];
 try {
   if (fs.existsSync(DATA_FILE)) {
     trackList = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+    if (!Array.isArray(trackList)) trackList = [];
   } else fs.writeFileSync(DATA_FILE, '[]', 'utf8');
 } catch {
   trackList = [];
 }
+
 function safeSave() {
-  try { fs.writeFileSync(DATA_FILE, JSON.stringify(trackList, null, 2), 'utf8'); }
-  catch (e) { console.error('⚠️ Ошибка сохранения:', e.message); }
+  try {
+    fs.writeFileSync(DATA_FILE, JSON.stringify(trackList, null, 2), 'utf8');
+  } catch (e) {
+    console.error('⚠️ Ошибка сохранения:', e.message);
+  }
 }
 
-// состояние пагинации: userId -> { key, page }
-const paginationState = new Map();
-
-// «временные показы» аудио: userId -> { trackId, msgIds: number[] }
-const tempPlays = new Map();
+// ────────────────────────────────
+// Состояние
+// ────────────────────────────────
+const paginationState = new Map(); // userId -> { key, page }
+const tempPlays = new Map(); // userId -> { trackId, msgIds }
 
 // ────────────────────────────────
-// Веб-сервер (для Render health check)
+// Веб-сервер (Render health check)
 // ────────────────────────────────
 const app = express();
 app.get('/', (_, res) => res.send('✅ Telegram Music Bot активен'));
 app.listen(PORT, () => console.log(`🌐 Сервер запущен на порту ${PORT}`));
 
 // ────────────────────────────────
-// Основной бот
+// Инициализация бота
 // ────────────────────────────────
 const bot = new Telegraf(BOT_TOKEN);
 
@@ -80,7 +87,7 @@ function likeBar(track, userId) {
 }
 
 // ────────────────────────────────
-// Пагинация (исправленная)
+// Пагинация
 // ────────────────────────────────
 function getListKey(title) {
   if (title.includes('📋')) return 'all';
@@ -90,6 +97,17 @@ function getListKey(title) {
   if (title.includes('🌍')) return 'global';
   if (title.includes('🏆')) return 'week';
   return 'all';
+}
+
+function titleByKey(key) {
+  return ({
+    all: '📋 Список треков',
+    mine: '🎧 Твои треки',
+    orig: '📀 Оригинальные',
+    cover: '🎤 Кавер-версии',
+    global: '🌍 Топ за всё время',
+    week: '🏆 Топ за неделю'
+  })[key] || '📋 Список треков';
 }
 
 function pickListByKey(key, userId) {
@@ -135,30 +153,14 @@ async function refreshPagination(ctx) {
   if (!state) return;
   const { key, page } = state;
   const list = pickListByKey(key, ctx.from.id);
-  const titleMap = {
-    all: '📋 Список треков',
-    mine: '🎧 Твои треки',
-    orig: '📀 Оригинальные',
-    cover: '🎤 Кавер-версии',
-    global: '🌍 Топ за всё время',
-    week: '🏆 Топ за неделю'
-  };
-  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
+  await showTracks(ctx, list, titleByKey(key), page);
 }
 
 bot.action(/^page_(.+)_(\d+)$/, async (ctx) => {
   const key = ctx.match[1];
   const page = parseInt(ctx.match[2]);
   const list = pickListByKey(key, ctx.from.id);
-  const titleMap = {
-    all: '📋 Список треков',
-    mine: '🎧 Твои треки',
-    orig: '📀 Оригинальные',
-    cover: '🎤 Кавер-версии',
-    global: '🌍 Топ за всё время',
-    week: '🏆 Топ за неделю'
-  };
-  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
+  await showTracks(ctx, list, titleByKey(key), page);
   await ctx.answerCbQuery();
 });
 
@@ -244,7 +246,7 @@ bot.on(['audio', 'document'], async (ctx) => {
 });
 
 // ────────────────────────────────
-// Inline-действия (лайки / удаление / тип)
+// Inline-действия
 // ────────────────────────────────
 bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   const [, id, type] = ctx.match;
@@ -252,31 +254,32 @@ bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   if (!tr) return ctx.answerCbQuery('Не найден');
   tr.type = type;
   safeSave();
-
   await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
   const ok = await ctx.reply('✔️ Сохранено');
   deleteLater(ctx, ok, 1000);
   await ctx.answerCbQuery();
 });
 
+// исправленный лайк (без дублей)
 bot.action(/^like_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   const tr = trackList.find(t => t.id === id);
   if (!tr) return ctx.answerCbQuery('Не найден');
+
   const uid = ctx.from.id;
   const i = tr.voters.indexOf(uid);
-  let toast;
+  let message = '';
+
   if (i >= 0) {
     tr.voters.splice(i, 1);
-    toast = await ctx.reply('💤 Лайк снят');
+    message = '💤 Лайк снят';
   } else {
     tr.voters.push(uid);
-    const eff = await ctx.reply(likeEffect());
-    deleteLater(ctx, eff, 1200);
-    toast = await ctx.reply('🔥 Лайк поставлен');
+    message = '🔥 Лайк поставлен';
   }
-  deleteLater(ctx, toast, 1200);
+
   safeSave();
+
   for (const m of tr.messages || []) {
     try {
       const { text, keyboard } = likeBar(tr, ctx.from.id);
@@ -285,7 +288,8 @@ bot.action(/^like_(.+)$/, async (ctx) => {
       });
     } catch {}
   }
-  await ctx.answerCbQuery();
+
+  await ctx.answerCbQuery(message, { show_alert: false });
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
@@ -353,7 +357,7 @@ bot.action(/^play_(.+)$/, async (ctx) => {
 });
 
 // ────────────────────────────────
-// Глобальный catch + авто-перезапуск
+// Глобальный catch + авто-рестарт
 // ────────────────────────────────
 bot.catch(err => {
   console.error('⚠️ Ошибка:', err.code || err.message);
@@ -363,10 +367,17 @@ bot.catch(err => {
   }
 });
 
+// Ping для Render
+setInterval(async () => {
+  try { await bot.telegram.getMe(); } catch {}
+}, 5 * 60 * 1000);
+
 // ────────────────────────────────
 // Запуск
 // ────────────────────────────────
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
+
 
