@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (Без автоудаления временных треков, V3)
+// bot.js — Telegram Music Bot (Стабилизированная версия)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -41,8 +41,8 @@ function safeSave() {
 // состояние пагинации: userId -> { key, page }
 const paginationState = new Map();
 
-// 🔴 УДАЛЕНО: map для временных сообщений (tempPlays) больше не нужен,
-// так как мы не удаляем сообщения.
+// «временные показы» аудио: userId -> { trackId, msgIds: number[] }
+const tempPlays = new Map();
 
 // ────────────────────────────────
 // Веб-сервер (для Render health check)
@@ -220,7 +220,7 @@ bot.on(['audio', 'document'], async (ctx) => {
       const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
       deleteLater(ctx, warn, 2500);
       
-      // ИСПРАВЛЕНИЕ: Удаляем оригинальное сообщение пользователя, если это дубликат
+      // 🟢 ИСПРАВЛЕНИЕ 1: Удаляем оригинальное сообщение пользователя, если это дубликат
       deleteLater(ctx, ctx.message, 100); 
       
       return;
@@ -343,24 +343,23 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   }
   tr.messages = updatedMessages; 
 
-  // 2. Обновление ВРЕМЕННЫХ лайк-панелей, если трек был вызван через 'play_'
-  // Мы не храним временные ID в Map, поэтому нужно искать последнюю лайк-панель в чате
-  
-  try {
-    // В этом сценарии (без tempPlays) мы не можем гарантировать, что
-    // найдем нужную временную панель, поэтому пока оставим только обновление
-    // постоянных сообщений, как ты и хотел. Если тебе нужно, чтобы 
-    // временные панели тоже обновлялись, мы должны были бы их хранить.
-    // Но поскольку ты просил убрать удаление, мы не храним их.
-    // Обновление: Временные лайк-панели теперь не обновляются, если трек
-    // был вызван через 'play_', так как мы не храним ID сообщений для обновления.
-    
-    // 🔴 УДАЛЕНО: Старая логика обновления tempPlays
-    
- } catch (e) {
-     console.error('Ошибка обновления временной лайк-панели (игнорируется):', e.message);
- }
- 
+  // 2. 🟢 ИСПРАВЛЕНИЕ 3: Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
+  const tempState = tempPlays.get(uid);
+  if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
+    // Временное сообщение с лайк-панелью — это последнее сообщение в msgIds
+    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
+    try {
+      await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+    } catch (e) {
+      // Игнорируем, если временное сообщение уже удалилось
+      if (!String(e.message).includes('message to edit not found')) {
+        console.error('Ошибка обновления временной лайк-панели:', e.message);
+      }
+    }
+  }
+
   await ctx.answerCbQuery();
 });
 
@@ -391,25 +390,32 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   if (!tr) return;
 
   const uid = String(ctx.from.id);
-  
-  // 🔴 УДАЛЕНО: Логика удаления предыдущего временного трека
-  
+  const prev = tempPlays.get(uid);
+  if (prev && prev.msgIds?.length) {
+    for (const mid of prev.msgIds) {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
+    }
+    tempPlays.delete(uid);
+  }
+
   const origin = (tr.messages || [])[0];
-  
+  let newIds = [];
   try {
     if (origin) {
-      // Отправляем трек
-      await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
+      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
+      newIds.push(cp.message_id);
     } else {
-      await ctx.reply(`▶️ ${tr.title}`);
+      const fallback = await ctx.reply(`▶️ ${tr.title}`);
+      newIds.push(fallback.message_id);
     }
-    
-    // Отправляем лайк-панель
     const { text, keyboard } = likeBar(tr, ctx.from.id);
-    await ctx.reply(text, keyboard);
+    const likeMsg = await ctx.reply(text, keyboard);
+    newIds.push(likeMsg.message_id);
   } catch {}
 
-  // 🔴 УДАЛЕНО: Логика сохранения состояния трека (tempPlays)
+  tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
+  
+  // 🟢 ИСПРАВЛЕНИЕ 2: Удалён таймаут автоудаления
   
   await ctx.answerCbQuery();
 });
@@ -431,6 +437,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
