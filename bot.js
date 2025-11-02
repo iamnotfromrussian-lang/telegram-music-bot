@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (фикс: без автоудаления, стабильные лайки и автосохранение)
+// bot.js — Telegram Music Bot (anti-dup + pagination fix + auto-restart)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -16,9 +16,7 @@ if (!BOT_TOKEN) {
   process.exit(1);
 }
 const ADMIN_IDS = (process.env.ADMIN_IDS || '1100564590')
-  .split(',')
-  .map(id => id.trim())
-  .filter(Boolean);
+  .split(',').map(id => id.trim()).filter(Boolean);
 const isAdmin = (id) => ADMIN_IDS.includes(String(id));
 
 const PORT = process.env.PORT || 3000;
@@ -31,37 +29,33 @@ let trackList = [];
 try {
   if (fs.existsSync(DATA_FILE)) {
     trackList = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-    if (!Array.isArray(trackList)) trackList = [];
   } else fs.writeFileSync(DATA_FILE, '[]', 'utf8');
 } catch {
   trackList = [];
 }
-
 function safeSave() {
-  try {
-    fs.writeFileSync(DATA_FILE, JSON.stringify(trackList, null, 2), 'utf8');
-  } catch (e) {
-    console.error('⚠️ Ошибка сохранения:', e.message);
-  }
+  try { fs.writeFileSync(DATA_FILE, JSON.stringify(trackList, null, 2), 'utf8'); }
+  catch (e) { console.error('⚠️ Ошибка сохранения:', e.message); }
 }
 
-// ────────────────────────────────
-// Состояние
-// ────────────────────────────────
+// состояние пагинации: userId -> { key, page }
 const paginationState = new Map();
+
+// «временные показы» аудио: userId -> { trackId, msgIds: number[] }
 const tempPlays = new Map();
 
 // ────────────────────────────────
-// Веб-сервер
+// Веб-сервер (для Render health check)
 // ────────────────────────────────
 const app = express();
 app.get('/', (_, res) => res.send('✅ Telegram Music Bot активен'));
 app.listen(PORT, () => console.log(`🌐 Сервер запущен на порту ${PORT}`));
 
 // ────────────────────────────────
-// Инициализация бота
+// Основной бот
 // ────────────────────────────────
 const bot = new Telegraf(BOT_TOKEN);
+
 const LIKE_EFFECTS = ['💞', '💫', '💥', '💎', '🔥'];
 const likeEffect = () => LIKE_EFFECTS[Math.floor(Math.random() * LIKE_EFFECTS.length)];
 
@@ -86,7 +80,7 @@ function likeBar(track, userId) {
 }
 
 // ────────────────────────────────
-// Пагинация
+// Пагинация (исправленная)
 // ────────────────────────────────
 function getListKey(title) {
   if (title.includes('📋')) return 'all';
@@ -96,17 +90,6 @@ function getListKey(title) {
   if (title.includes('🌍')) return 'global';
   if (title.includes('🏆')) return 'week';
   return 'all';
-}
-
-function titleByKey(key) {
-  return ({
-    all: '📋 Список треков',
-    mine: '🎧 Твои треки',
-    orig: '📀 Оригинальные',
-    cover: '🎤 Кавер-версии',
-    global: '🌍 Топ за всё время',
-    week: '🏆 Топ за неделю'
-  })[key] || '📋 Список треков';
 }
 
 function pickListByKey(key, userId) {
@@ -147,11 +130,35 @@ async function showTracks(ctx, list, title, page = 1) {
   await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
 }
 
+async function refreshPagination(ctx) {
+  const state = paginationState.get(String(ctx.from.id));
+  if (!state) return;
+  const { key, page } = state;
+  const list = pickListByKey(key, ctx.from.id);
+  const titleMap = {
+    all: '📋 Список треков',
+    mine: '🎧 Твои треки',
+    orig: '📀 Оригинальные',
+    cover: '🎤 Кавер-версии',
+    global: '🌍 Топ за всё время',
+    week: '🏆 Топ за неделю'
+  };
+  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
+}
+
 bot.action(/^page_(.+)_(\d+)$/, async (ctx) => {
   const key = ctx.match[1];
   const page = parseInt(ctx.match[2]);
   const list = pickListByKey(key, ctx.from.id);
-  await showTracks(ctx, list, titleByKey(key), page);
+  const titleMap = {
+    all: '📋 Список треков',
+    mine: '🎧 Твои треки',
+    orig: '📀 Оригинальные',
+    cover: '🎤 Кавер-версии',
+    global: '🌍 Топ за всё время',
+    week: '🏆 Топ за неделю'
+  };
+  await showTracks(ctx, list, titleMap[key] || '📋 Список треков', page);
   await ctx.answerCbQuery();
 });
 
@@ -237,7 +244,7 @@ bot.on(['audio', 'document'], async (ctx) => {
 });
 
 // ────────────────────────────────
-// Inline-действия
+// Inline-действия (лайки / удаление / тип)
 // ────────────────────────────────
 bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   const [, id, type] = ctx.match;
@@ -245,20 +252,31 @@ bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
   if (!tr) return ctx.answerCbQuery('Не найден');
   tr.type = type;
   safeSave();
+
   await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
-  await ctx.answerCbQuery('Сохранено');
+  const ok = await ctx.reply('✔️ Сохранено');
+  deleteLater(ctx, ok, 1000);
+  await ctx.answerCbQuery();
 });
 
 bot.action(/^like_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   const tr = trackList.find(t => t.id === id);
   if (!tr) return ctx.answerCbQuery('Не найден');
-
   const uid = ctx.from.id;
   const i = tr.voters.indexOf(uid);
-  if (i >= 0) tr.voters.splice(i, 1); else tr.voters.push(uid);
+  let toast;
+  if (i >= 0) {
+    tr.voters.splice(i, 1);
+    toast = await ctx.reply('💤 Лайк снят');
+  } else {
+    tr.voters.push(uid);
+    const eff = await ctx.reply(likeEffect());
+    deleteLater(ctx, eff, 1200);
+    toast = await ctx.reply('🔥 Лайк поставлен');
+  }
+  deleteLater(ctx, toast, 1200);
   safeSave();
-
   for (const m of tr.messages || []) {
     try {
       const { text, keyboard } = likeBar(tr, ctx.from.id);
@@ -267,12 +285,12 @@ bot.action(/^like_(.+)$/, async (ctx) => {
       });
     } catch {}
   }
-
-  await ctx.answerCbQuery('✅');
+  await ctx.answerCbQuery();
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
+
   const id = ctx.match[1];
   const idx = trackList.findIndex(t => t.id === id);
   if (idx === -1) return ctx.answerCbQuery('Не найден');
@@ -284,9 +302,41 @@ bot.action(/^del_(.+)$/, async (ctx) => {
 
   trackList.splice(idx, 1);
   safeSave();
-  await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
+
+  const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
+  deleteLater(ctx, info, 1800);
+  await refreshPagination(ctx);
   await ctx.answerCbQuery('Удалено');
 });
+
+bot.action(/^play_(.+)$/, async (ctx) => {
+  const id = ctx.match[1];
+  const tr = trackList.find(t => t.id === id);
+  if (!tr) return ctx.answerCbQuery('Не найден');
+
+  const uid = String(ctx.from.id);
+  const prev = tempPlays.get(uid);
+  if (prev && prev.msgIds?.length) {
+    for (const mid of prev.msgIds) {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
+    }
+    tempPlays.delete(uid);
+  }
+
+  const origin = (tr.messages || [])[0];
+  let newIds = [];
+  try {
+    if (origin) {
+      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
+      newIds.push(cp.message_id);
+    } else {
+      const fallback = await ctx.reply(`▶️ ${tr.title}`);
+      newIds.push(fallback.message_id);
+    }
+    const { text, keyboard } = likeBar(tr, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    newIds.push(likeMsg.message_id);
+  } catch {}
 
 // отключено автоудаление (раньше было через 60000)
 bot.action(/^play_(.+)$/, async (ctx) => {
@@ -299,10 +349,12 @@ bot.action(/^play_(.+)$/, async (ctx) => {
     else await ctx.reply(`▶️ ${tr.title}`);
   } catch {}
   await ctx.answerCbQuery();
+
+  await ctx.answerCbQuery();
 });
 
 // ────────────────────────────────
-// Глобальный catch + авто-рестарт
+// Глобальный catch + авто-перезапуск
 // ────────────────────────────────
 bot.catch(err => {
   console.error('⚠️ Ошибка:', err.code || err.message);
@@ -312,16 +364,12 @@ bot.catch(err => {
   }
 });
 
-// ping для Render
-setInterval(() => { safeSave(); }, 2 * 60 * 1000);
-
 // ────────────────────────────────
 // Запуск
 // ────────────────────────────────
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
 
 
 
