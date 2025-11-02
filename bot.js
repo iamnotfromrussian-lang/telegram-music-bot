@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (с исправлением лайков на временных сообщениях)
+// bot.js — Telegram Music Bot (Без автоудаления временных треков)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -343,7 +343,7 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   }
   tr.messages = updatedMessages; 
 
-  // 2. ДОБАВЛЕНИЕ: Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
+  // 2. Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
   const tempState = tempPlays.get(uid);
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
     // Временное сообщение с лайк-панелью — это последнее сообщение в msgIds
@@ -390,6 +390,8 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   if (!tr) return;
 
   const uid = String(ctx.from.id);
+  
+  // Удаляем предыдущий временный трек пользователя (для чистоты чата)
   const prev = tempPlays.get(uid);
   if (prev && prev.msgIds?.length) {
     for (const mid of prev.msgIds) {
@@ -413,17 +415,9 @@ bot.action(/^play_(.+)$/, async (ctx) => {
     newIds.push(likeMsg.message_id);
   } catch {}
 
-  tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
-  setTimeout(async () => {
-    const cur = tempPlays.get(uid);
-    if (cur && cur.trackId === tr.id) {
-      for (const mid of cur.msgIds) {
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
-      }
-      tempPlays.delete(uid);
-    }
-  }, 60000);
-
+  // 🟢 ИЗМЕНЕНИЕ: Сохраняем состояние нового трека БЕЗ таймаута автоудаления.
+  tempPlays.set(uid, { trackId: tr.id, msgIds: newIds }); 
+  
   await ctx.answerCbQuery();
 });
 
