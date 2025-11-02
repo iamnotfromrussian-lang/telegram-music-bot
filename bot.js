@@ -1,4 +1,4 @@
-// bot.js — Telegram Music Bot (Стабилизированная версия)
+// bot.js — Telegram Music Bot (Стабилизированная версия с исправлением лайк-плашки)
 // npm i telegraf express dotenv
 
 import 'dotenv/config';
@@ -220,7 +220,7 @@ bot.on(['audio', 'document'], async (ctx) => {
       const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
       deleteLater(ctx, warn, 2500);
       
-      // 🟢 ИСПРАВЛЕНИЕ 1: Удаляем оригинальное сообщение пользователя, если это дубликат
+      // ИСПРАВЛЕНИЕ: Удаляем оригинальное сообщение пользователя, если это дубликат
       deleteLater(ctx, ctx.message, 100); 
       
       return;
@@ -329,21 +329,26 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   const updatedMessages = [];
   for (const m of tr.messages || []) {
     try {
-      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
-        reply_markup: keyboard.reply_markup
-      });
-      updatedMessages.push(m); // Сообщение успешно обновлено
+      // Пытаемся редактировать только лайк-панели и служебные сообщения.
+      // Оригинальное аудио (первый элемент) не редактируем.
+      if (m.messageId !== tr.messages[0]?.messageId) {
+        await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
+          reply_markup: keyboard.reply_markup
+        });
+      }
+      updatedMessages.push(m); // Сообщение успешно обновлено (или это аудио, которое не редактировали)
     } catch (e) {
-      // Игнорируем ошибку, если сообщение не найдено
-      if (!String(e.message).includes('message to edit not found')) {
+      const errMsg = String(e.message);
+      // Игнорируем ошибку, если сообщение не найдено или не модифицировано
+      if (!errMsg.includes('message to edit not found') && !errMsg.includes('message is not modified')) {
         console.error('Ошибка обновления постоянной лайк-панели:', e.message);
-        updatedMessages.push(m);
+        updatedMessages.push(m); 
       }
     }
   }
-  tr.messages = updatedMessages; 
+  tr.messages = updatedMessages; // Обновляем список, удаляя несуществующие сообщения
 
-  // 2. 🟢 ИСПРАВЛЕНИЕ 3: Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
+  // 2. Обновление ВРЕМЕННЫХ лайк-панелей (tempPlays)
   const tempState = tempPlays.get(uid);
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
     // Временное сообщение с лайк-панелью — это последнее сообщение в msgIds
@@ -362,6 +367,7 @@ bot.action(/^like_(.+)$/, async (ctx) => {
 
   await ctx.answerCbQuery();
 });
+
 
 bot.action(/^del_(.+)$/, async (ctx) => {
   if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
@@ -391,6 +397,8 @@ bot.action(/^play_(.+)$/, async (ctx) => {
 
   const uid = String(ctx.from.id);
   const prev = tempPlays.get(uid);
+  
+  // Удаляем предыдущий временный трек пользователя (для чистоты чата)
   if (prev && prev.msgIds?.length) {
     for (const mid of prev.msgIds) {
       try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
@@ -415,7 +423,7 @@ bot.action(/^play_(.+)$/, async (ctx) => {
 
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
   
-  // 🟢 ИСПРАВЛЕНИЕ 2: Удалён таймаут автоудаления
+  // ⚠️ ИСПРАВЛЕНИЕ: Автоудаление через 60 секунд было убрано в прошлой версии
   
   await ctx.answerCbQuery();
 });
@@ -437,7 +445,6 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
-
 
 
 
