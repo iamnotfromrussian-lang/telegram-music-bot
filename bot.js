@@ -330,24 +330,40 @@ bot.action(/^like_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
 
-  const id = ctx.match[1];
-  const idx = trackList.findIndex(t => t.id === id);
-  if (idx === -1) return ctx.answerCbQuery('Не найден');
-  const tr = trackList[idx];
+  const id = ctx.match[1];
+  const idx = trackList.findIndex(t => t.id === id);
+  if (idx === -1) return ctx.answerCbQuery('Не найден');
+  const tr = trackList[idx];
 
-  for (const m of tr.messages || []) {
-    await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
-  }
+  // 1. УДАЛЕНИЕ ПОСТОЯННЫХ СООБЩЕНИЙ
+  // Идем с конца, чтобы удалить сначала лайк-панель, тип, "добавлен", и т.д.
+  for (let i = (tr.messages?.length || 0) - 1; i > 0; i--) { 
+    // Начинаем с 1, чтобы избежать удаления tr.messages[0] (оригинальное аудио)
+    const m = tr.messages[i];
+    await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
+  }
 
-  trackList.splice(idx, 1);
-  safeSave();
+  // 2. УДАЛЕНИЕ ВРЕМЕННЫХ СООБЩЕНИЙ (если трек сейчас проигрывается у кого-то)
+  // Итерируемся по всем текущим play-сессиям
+  for (const [uid, state] of tempPlays.entries()) {
+    if (state.trackId === id && state.msgIds?.length) {
+      for (const mid of state.msgIds) {
+        await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => {});
+      }
+      tempPlays.delete(uid); // Удаляем сессию из мапы
+    }
+  }
 
-  const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
-  deleteLater(ctx, info, 1800);
-  await refreshPagination(ctx);
-  await ctx.answerCbQuery('Удалено');
+
+  trackList.splice(idx, 1);
+  safeSave();
+
+  const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
+  deleteLater(ctx, info, 1800);
+  await refreshPagination(ctx);
+  await ctx.answerCbQuery('Удалено');
 });
 
 bot.action(/^play_(.+)$/, async (ctx) => {
@@ -402,6 +418,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
