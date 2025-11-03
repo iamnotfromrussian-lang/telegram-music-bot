@@ -6,6 +6,7 @@ import { Telegraf, Markup } from 'telegraf';
 import fs from 'fs';
 import path from 'path';
 import express from 'express';
+import mongoose from 'mongoose'; //
 
 // ────────────────────────────────
 // Конфигурация
@@ -20,23 +21,45 @@ const ADMIN_IDS = (process.env.ADMIN_IDS || '1100564590')
 const isAdmin = (id) => ADMIN_IDS.includes(String(id));
 
 const PORT = process.env.PORT || 3000;
-const DATA_FILE = path.join(process.cwd(), 'trackList.json');
+// ────────────────────────────────
+// КОНФИГУРАЦИЯ БАЗЫ ДАННЫХ
+// ────────────────────────────────
+const MONGO_URI = process.env.MONGO_URI;
 
-// ────────────────────────────────
-// Хранилище
-// ────────────────────────────────
+// 1. Определение схемы трека (что мы храним о каждом треке)
+const TrackSchema = new mongoose.Schema({
+  id: { type: String, unique: true, required: true },
+  fileId: String,
+  fileUniqueId: String,
+  title: String,
+  userId: Number,
+  voters: [Number], // Массив ID пользователей, проголосовавших за трек
+  createdAt: { type: Date, default: Date.now },
+  type: { type: String, enum: ['original', 'cover'], default: 'original' },
+});
+
+// 2. Создание модели, которая позволяет нам взаимодействовать с коллекцией
+const TrackModel = mongoose.model('Track', TrackSchema);
+
+// 3. Функция подключения к БД (будет вызвана при запуске бота)
+async function connectDB() {
+  if (!MONGO_URI) {
+    console.error('❌ MONGO_URI отсутствует. Бот не запустится.');
+    process.exit(1);
+  }
+  try {
+    await mongoose.connect(MONGO_URI);
+    console.log('💾 Успешное подключение к MongoDB.');
+  } catch (e) {
+    console.error('⚠️ Ошибка подключения к MongoDB:', e.message);
+    // Выход из процесса, если подключение не удалось
+    setTimeout(() => process.exit(1), 5000); 
+  }
+}
+
+// ⚠️ Временно оставим этот массив, чтобы избежать ошибок
+// до тех пор, пока мы не заменим все функции, которые на него полагаются.
 let trackList = [];
-try {
-  if (fs.existsSync(DATA_FILE)) {
-    trackList = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-  } else fs.writeFileSync(DATA_FILE, '[]', 'utf8');
-} catch {
-  trackList = [];
-}
-function safeSave() {
-  try { fs.writeFileSync(DATA_FILE, JSON.stringify(trackList, null, 2), 'utf8'); }
-  catch (e) { console.error('⚠️ Ошибка сохранения:', e.message); }
-}
 
 // состояние пагинации: userId -> { key, page }
 const paginationState = new Map();
@@ -92,19 +115,36 @@ function getListKey(title) {
   return 'all';
 }
 
-function pickListByKey(key, userId) {
-  switch (key) {
-    case 'mine': return trackList.filter(t => t.userId === userId);
-    case 'orig': return trackList.filter(t => t.type === 'original');
-    case 'cover': return trackList.filter(t => t.type === 'cover');
-    case 'global': return [...trackList].sort((a, b) => b.voters.length - a.voters.length);
-    case 'week': {
-      const weekAgo = Date.now() - 7 * 86400000;
-      return trackList.filter(t => new Date(t.createdAt).getTime() >= weekAgo)
-                      .sort((a, b) => b.voters.length - a.voters.length);
-    }
-    default: return trackList;
-  }
+/**
+ * Получает список треков из MongoDB в зависимости от ключа фильтрации.
+ * @param {string} key - Ключ фильтрации (mine, orig, cover, global, week).
+ * @param {number} userId - ID пользователя для фильтрации "Мои треки".
+ * @returns {Promise<Array<Object>>} - Промис, возвращающий список треков.
+ */
+async function pickListByKey(key, userId) {
+  switch (key) {
+    case 'mine': 
+      // Мои треки: фильтр по userId, сортировка по дате (новые сверху)
+      return TrackModel.find({ userId }).sort({ createdAt: -1 });
+    case 'orig': 
+      // Оригинальные: фильтр по type: 'original', сортировка по дате
+      return TrackModel.find({ type: 'original' }).sort({ createdAt: -1 });
+    case 'cover': 
+      // Каверы: фильтр по type: 'cover', сортировка по дате
+      return TrackModel.find({ type: 'cover' }).sort({ createdAt: -1 });
+    case 'global': 
+      // Топ за всё время: сортировка по количеству лайков и дате
+      return TrackModel.find().sort({ 'voters.length': -1, createdAt: -1 });
+    case 'week': {
+      // Топ за неделю: фильтр по дате (последние 7 дней), сортировка по лайкам
+      const weekAgo = new Date(Date.now() - 7 * 86400000);
+      return TrackModel.find({ createdAt: { $gte: weekAgo } })
+                       .sort({ 'voters.length': -1, createdAt: -1 });
+    }
+    default: 
+      // Общий список: все треки, сортировка по дате
+      return TrackModel.find().sort({ createdAt: -1 });
+  }
 }
 
 async function showTracks(ctx, list, title, page = 1) {
@@ -149,7 +189,7 @@ async function refreshPagination(ctx) {
   const state = paginationState.get(String(ctx.from.id));
   if (!state) return;
   const { key, page } = state;
-  const list = pickListByKey(key, ctx.from.id);
+  const list = await pickListByKey(key, ctx.from.id); // 🛑 ДОБАВЛЕНО await
   const titleMap = {
     all: '📋 Список треков',
     mine: '🎧 Твои треки',
@@ -164,7 +204,7 @@ async function refreshPagination(ctx) {
 bot.action(/^page_(.+)_(\d+)$/, async (ctx) => {
   const key = ctx.match[1];
   const page = parseInt(ctx.match[2]);
-  const list = pickListByKey(key, ctx.from.id);
+  const list = await pickListByKey(key, ctx.from.id); // 🛑 ДОБАВЛЕНО await
   const titleMap = {
     all: '📋 Список треков',
     mine: '🎧 Твои треки',
@@ -185,10 +225,23 @@ bot.start(ctx => ctx.reply(
   mainMenu
 ));
 
-bot.hears('📊 Статистика', ctx => {
-  const users = new Set(trackList.map(t => t.userId)).size;
-  const totalLikes = trackList.reduce((s, t) => s + t.voters.length, 0);
-  ctx.reply(`📊 Статистика:\n👥 Пользователей: ${users}\n🎵 Треков: ${trackList.length}\n❤️ Голосов: ${totalLikes}`, mainMenu);
+bot.hears('📊 Статистика', async ctx => { // 🛑 ДОБАВЛЕНО async
+  const totalTracks = await TrackModel.countDocuments(); // 🛑 ЗАМЕНА
+  const users = await TrackModel.distinct('userId'); // 🛑 ЗАМЕНА
+  // Агрегация для подсчета лайков
+  const totalLikes = (await TrackModel.aggregate([{ $project: { _id: 0, likes: { $size: '$voters' } } }, { $group: { _id: null, total: { $sum: '$likes' } } }]))[0]?.total || 0;
+  ctx.reply(`📊 Статистика:\n👥 Пользователей: ${users.length}\n🎵 Треков: ${totalTracks}\n❤️ Голосов: ${totalLikes}`, mainMenu);
+});
+
+// 🛑 ОБНОВЛЕНИЕ: Все команды теперь асинхронно вызывают pickListByKey
+bot.hears('📋 Список треков', async ctx => showTracks(ctx, await pickListByKey('all'), '📋 Список треков', 1));
+bot.hears('🎧 Мои треки', async ctx => showTracks(ctx, await pickListByKey('mine', ctx.from.id), '🎧 Твои треки', 1));
+bot.hears('📀 Оригинальные', async ctx => showTracks(ctx, await pickListByKey('orig'), '📀 Оригинальные', 1));
+bot.hears('🎤 Кавер-версии', async ctx => showTracks(ctx, await pickListByKey('cover'), '🎤 Кавер-версии', 1));
+bot.hears('🌍 Топ за всё время', async ctx => showTracks(ctx, await pickListByKey('global'), '🌍 Топ за всё время', 1));
+bot.hears('🏆 Топ за неделю', async ctx => {
+  const week = await pickListByKey('week');
+  showTracks(ctx, week, '🏆 Топ за неделю', 1);
 });
 
 bot.hears('📋 Список треков', ctx => showTracks(ctx, trackList, '📋 Список треков', 1));
@@ -206,33 +259,62 @@ bot.hears('🏆 Топ за неделю', ctx => {
 // ────────────────────────────────
 // Приём аудио
 // ────────────────────────────────
+// ────────────────────────────────
+// Приём аудио
+// ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
-  try {
-    const file = ctx.message.audio || ctx.message.document;
-    if (!file) return;
+  try {
+    const file = ctx.message.audio || ctx.message.document;
+    if (!file) return;
 
-    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
-    if (exists) {
-      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
-      deleteLater(ctx, warn, 2500);
-      return;
-    }
+    // 🛑 ЗАМЕНА: Проверка на дубликат через БД
+    const exists = await TrackModel.exists({ $or: [{ fileId: file.file_id }, { fileUniqueId: file.file_unique_id }] });
+    if (exists) {
+      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
+      deleteLater(ctx, warn, 2500);
+      return;
+    }
 
-    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
-    const id = `${file.file_unique_id}_${Date.now()}`;
+    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
+    const id = `${file.file_unique_id}_${Date.now()}`;
 
-    const track = {
-      id,
-      fileId: file.file_id,
-      fileUniqueId: file.file_unique_id,
-      title: safeName,
-      userId: ctx.from.id,
-      voters: [],
-      createdAt: new Date().toISOString(),
-      type: 'original',
-      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
-    };
+    const trackData = { // 🛑 ИСПОЛЬЗУЕМ trackData для создания документа в БД
+      id,
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      title: safeName,
+      userId: ctx.from.id,
+      voters: [],
+      createdAt: new Date().toISOString(),
+      type: 'original',
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
+    };
 
+    const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
+    deleteLater(ctx, addedMsg, 2000);
+    trackData.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
+
+    const typeMsg = await ctx.reply(
+      'Выбери тип трека:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📀 Оригинальный', `type_${id}_original`)],
+        [Markup.button.callback('🎤 Cover Version', `type_${id}_cover`)]
+      ])
+    );
+    trackData.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
+
+    // Временно используем trackData для likeBar
+    const { text, keyboard } = likeBar(trackData, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    trackData.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
+
+    // 🛑 КРИТИЧЕСКАЯ ЗАМЕНА: Создание документа в БД
+    await TrackModel.create(trackData); 
+  } catch (e) {
+    console.error('audio handler error:', e);
+    ctx.reply('❌ Не удалось обработать файл.').catch(() => {});
+  }
+});
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
@@ -262,24 +344,30 @@ bot.on(['audio', 'document'], async (ctx) => {
 // Inline-действия (лайки / удаление / тип)
 // ────────────────────────────────
 bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
-  const [, id, type] = ctx.match;
-  const tr = trackList.find(t => t.id === id);
-  if (!tr) return ctx.answerCbQuery('Не найден');
-  tr.type = type;
-  safeSave();
+  const [, id, type] = ctx.match;
+  // 🛑 ЗАМЕНА: Поиск трека по ID в БД
+  const tr = await TrackModel.findOne({ id }); 
+  if (!tr) return ctx.answerCbQuery('Не найден');
+  
+  tr.type = type;
+  // 🛑 ЗАМЕНА: Сохранение изменений в БД
+  await tr.save(); 
 
-  await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
-  const ok = await ctx.reply('✔️ Сохранено');
-  deleteLater(ctx, ok, 1000);
-  await ctx.answerCbQuery();
+  await ctx.editMessageText(`✅ Тип установлен: ${type === 'original' ? '📀 Оригинальный' : '🎤 Cover Version'}`).catch(() => {});
+  const ok = await ctx.reply('✔️ Сохранено');
+  deleteLater(ctx, ok, 1000);
+  await ctx.answerCbQuery();
 });
 
 bot.action(/^like_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
-  const tr = trackList.find(t => t.id === id);
+  // 🛑 ЗАМЕНА: Поиск трека в БД
+  const tr = await TrackModel.findOne({ id }); 
   if (!tr) return ctx.answerCbQuery('Не найден');
+  
   const uid = ctx.from.id;
-  const i = tr.voters.indexOf(uid);
+  // voters в Mongoose — это прямой массив, работаем с ним как раньше
+  const i = tr.voters.indexOf(uid); 
   let toast;
 
   // 1. Логика добавления/удаления лайка
@@ -293,61 +381,78 @@ bot.action(/^like_(.+)$/, async (ctx) => {
     toast = await ctx.reply('🔥 Лайк поставлен');
   }
   deleteLater(ctx, toast, 1200);
-  safeSave();
+  // 🛑 КРИТИЧЕСКАЯ ЗАМЕНА: Сохранение изменений в БД
+  await tr.save(); 
 
   // 2. Генерируем новый текст и кнопки
   const { text, keyboard } = likeBar(tr, ctx.from.id);
 
-  // 3. ОБНОВЛЕНИЕ ВСЕХ КОПИЙ
-
+  // 3. ОБНОВЛЕНИЕ ВСЕХ КОПИЙ (тут без изменений, т.к. работаем с Telegram API)
+  // ... (оставшаяся логика обновления сообщений остается без изменений)
+  
   // 3.1. Обновление ПОСТОЯННЫХ копий (загруженный трек)
   for (const m of tr.messages || []) {
     try {
-      // Пробуем отредактировать текущее сообщение (если это лайк-панель)
       await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
         reply_markup: keyboard.reply_markup
       });
-    } catch (e) {
-      // Игнорируем ошибки редактирования (сообщение-аудио, не найдено, не изменено)
-    }
+    } catch (e) {}
   }
-  
-  // 3.2. 🟢 ИСПРАВЛЕНИЕ: Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
+  
+  // 3.2. Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
   const tempState = tempPlays.get(String(uid));
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
-    // Временная лайк-панель — это обычно последнее сообщение в tempPlays
-    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
+    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
     try {
       await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
         reply_markup: keyboard.reply_markup
       });
-    } catch (e) {
-      // Игнорируем ошибки
-    }
+    } catch (e) {}
   }
 
   await ctx.answerCbQuery();
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
-  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
+  if (!isAdmin(ctx.from.id)) return ctx.answerCbQuery('Нет прав', { show_alert: true });
 
-  const id = ctx.match[1];
-  const idx = trackList.findIndex(t => t.id === id);
-  if (idx === -1) return ctx.answerCbQuery('Не найден');
-  const tr = trackList[idx];
+  const id = ctx.match[1];
+  // 🛑 ЗАМЕНА: Находим трек в БД
+  const tr = await TrackModel.findOne({ id }); 
+  if (!tr) return ctx.answerCbQuery('Не найден');
 
-  for (const m of tr.messages || []) {
-    await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
-  }
+  // 1. УДАЛЕНИЕ ПОСТОЯННЫХ СООБЩЕНИЙ (кроме оригинального аудио)
+  for (let i = (tr.messages?.length || 0) - 1; i > 0; i--) { 
+    const m = tr.messages[i];
+    await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
+  }
 
-  trackList.splice(idx, 1);
-  safeSave();
+  // 2. УДАЛЕНИЕ ВРЕМЕННЫХ СООБЩЕНИЙ (play-сессий)
+  for (const [uid, state] of tempPlays.entries()) {
+    if (state.trackId === id && state.msgIds?.length) {
+      for (const mid of state.msgIds) {
+        await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => {});
+      }
+      tempPlays.delete(uid);
+    }
+  }
+    
+  // 3. УДАЛЕНИЕ СТАРОЙ ИСТОРИИ СООБЩЕНИЙ СО СПИСКАМИ (чтобы не показывать мертвый трек)
+  const uid = String(ctx.from.id);
+  const listIds = listMsgHistory.get(uid) || [];
+  for (const mid of listIds) {
+    await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => {});
+  }
+  listMsgHistory.delete(uid);
 
-  const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
-  deleteLater(ctx, info, 1800);
-  await refreshPagination(ctx);
-  await ctx.answerCbQuery('Удалено');
+  // 🛑 КРИТИЧЕСКАЯ ЗАМЕНА: Удаление документа из БД
+  await TrackModel.deleteOne({ id }); 
+  
+  const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
+  deleteLater(ctx, info, 1800);
+  
+  await refreshPagination(ctx); 
+  await ctx.answerCbQuery('Удалено');
 });
 
 bot.action(/^play_(.+)$/, async (ctx) => {
@@ -399,9 +504,20 @@ bot.catch(err => {
 // ────────────────────────────────
 // Запуск
 // ────────────────────────────────
-bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
+// ────────────────────────────────
+// Запуск
+// ────────────────────────────────
+async function startBot() {
+  // 🛑 КРИТИЧЕСКАЯ ЗАМЕНА: Сначала подключаемся к БД
+  await connectDB(); 
+  await bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
+}
+
+startBot(); // 🛑 Запускаем асинхронную функцию startBot
+
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
