@@ -6,7 +6,7 @@ import { Telegraf, Markup } from 'telegraf';
 import fs from 'fs';
 import path from 'path';
 import express from 'express';
-import mongoose from 'mongoose'; // 🛑 MongoDB: ДОБАВЛЕНО
+import mongoose from 'mongoose'; 
 
 // ────────────────────────────────
 // Конфигурация
@@ -92,8 +92,11 @@ function deleteLater(ctx, msg, delayMs = 1500) {
 }
 
 function likeBar(track, userId) {
+  // При использовании агрегации MongoDB возвращает voteCount, а не voters.length.
+  // Мы используем оператор "?." для безопасного доступа.
+  const voteCount = track.voters?.length ?? track.voteCount ?? 0;
   const liked = track.voters?.includes(userId);
-  const text = `❤️ ${track.voters.length} — ${track.title}`;
+  const text = `❤️ ${voteCount} — ${track.title}`;
   const row = [Markup.button.callback(liked ? '💔 Убрать лайк' : '❤️ Поставить лайк', `like_${track.id}`)];
   if (isAdmin(userId)) row.push(Markup.button.callback('🗑 Удалить', `del_${track.id}`));
   return { text, keyboard: Markup.inlineKeyboard([row]) };
@@ -114,9 +117,10 @@ function getListKey(title) {
 
 /**
  * Получает список треков из MongoDB в зависимости от ключа фильтрации.
+ * 🟢 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: Используем aggregate() для сортировки по лайкам (длине массива)
  * @param {string} key - Ключ фильтрации (mine, orig, cover, global, week).
  * @param {number} userId - ID пользователя для фильтрации "Мои треки".
- * @returns {Promise<Array<Object>>} - Промис, возвращающий список треков.
+ * @returns {Promise<Array<Object>>} - Промис, возвращающий список треков (Mongoose documents или plain objects).
  */
 async function pickListByKey(key, userId) {
   switch (key) {
@@ -129,15 +133,24 @@ async function pickListByKey(key, userId) {
     case 'cover': 
       // Каверы: фильтр по type: 'cover', сортировка по дате
       return TrackModel.find({ type: 'cover' }).sort({ createdAt: -1 });
+    
     case 'global': 
-      // Топ за всё время: сортировка по количеству лайков и дате
-      return TrackModel.find().sort({ 'voters.length': -1, createdAt: -1 });
+      // 🟢 ИСПРАВЛЕНО: Топ за всё время - сортировка по количеству лайков через агрегацию
+      return TrackModel.aggregate([
+        { $addFields: { voteCount: { $size: "$voters" } } }, // Добавляем поле voteCount
+        { $sort: { voteCount: -1, createdAt: -1 } } // Сортируем по voteCount DESC, затем по дате
+      ]);
+
     case 'week': {
-      // Топ за неделю: фильтр по дате (последние 7 дней), сортировка по лайкам
+      // 🟢 ИСПРАВЛЕНО: Топ за неделю - сортировка по лайкам через агрегацию + фильтр по дате
       const weekAgo = new Date(Date.now() - 7 * 86400000);
-      return TrackModel.find({ createdAt: { $gte: weekAgo } })
-                       .sort({ 'voters.length': -1, createdAt: -1 });
+      return TrackModel.aggregate([
+        { $match: { createdAt: { $gte: weekAgo } } }, // 1. Фильтр по дате (последние 7 дней)
+        { $addFields: { voteCount: { $size: "$voters" } } }, // 2. Добавляем поле voteCount
+        { $sort: { voteCount: -1, createdAt: -1 } } // 3. Сортируем по voteCount DESC, затем по дате
+      ]);
     }
+
     default: 
       // Общий список: все треки, сортировка по дате
       return TrackModel.find().sort({ createdAt: -1 });
@@ -165,8 +178,10 @@ async function showTracks(ctx, list, title, page = 1) {
     if (displayTitle.length > MAX_TITLE_LENGTH) {
       displayTitle = displayTitle.substring(0, MAX_TITLE_LENGTH).trim() + '...';
     }
+    // При агрегации у нас есть t.voteCount, иначе t.voters.length
+    const voteCount = t.voters?.length ?? t.voteCount ?? 0;
     // Новый формат: ❤️ [Лайки] • ▶️ [Название]
-    const buttonText = `❤️ ${t.voters.length} • ▶️ ${displayTitle}`; 
+    const buttonText = `❤️ ${voteCount} • ▶️ ${displayTitle}`; 
     return [Markup.button.callback(buttonText, `play_${t.id}`)];
   });
   
@@ -411,7 +426,14 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   // 🛑 ИСПРАВЛЕНИЕ: Поиск трека по ID в БД
   const tr = await TrackModel.findOne({ id }); 
-  if (!tr) return ctx.answerCbQuery('Не найден');
+  if (!tr) {
+    // Если трек не найден через findOne, попробуем найти его в результате агрегации
+    const aggResult = await TrackModel.aggregate([{ $match: { id: id } }]);
+    if (aggResult.length === 0) return ctx.answerCbQuery('Не найден');
+    tr = aggResult[0];
+  }
+  // const tr = await TrackModel.findOne({ id }); 
+  // if (!tr) return ctx.answerCbQuery('Не найден'); // ❌ Убрали эту строку, так как агрегация возвращает plain object
 
   const uid = String(ctx.from.id);
   const prev = tempPlays.get(uid);
@@ -432,7 +454,8 @@ bot.action(/^play_(.+)$/, async (ctx) => {
       const fallback = await ctx.reply(`▶️ ${tr.title}`);
       newIds.push(fallback.message_id);
     }
-    const { text, keyboard } = likeBar(tr, ctx.from.id);
+    // 🛑 ИСПРАВЛЕНИЕ: Используем tr, полученный агрегацией, для likeBar
+    const { text, keyboard } = likeBar(tr, ctx.from.id); 
     const likeMsg = await ctx.reply(text, keyboard);
     newIds.push(likeMsg.message_id);
   } catch {}
