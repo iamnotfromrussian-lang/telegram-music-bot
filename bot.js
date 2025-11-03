@@ -100,7 +100,6 @@ function likeBar(track, userId) {
   if (isAdmin(userId)) row.push(Markup.button.callback('🗑 Удалить', `del_${track.id}`));
   return { text, keyboard: Markup.inlineKeyboard([row]) };
 }
-}
 
 // ────────────────────────────────
 // Пагинация (MongoDB)
@@ -491,6 +490,7 @@ startBot(); // 🛑 Запускаем асинхронную функцию sta
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
