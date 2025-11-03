@@ -263,7 +263,7 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   const tr = trackList.find(t => t.id === id);
   if (!tr) return ctx.answerCbQuery('Не найден');
-  const uid = String(ctx.from.id); // Используем String(uid) для консистентности
+  const uid = ctx.from.id;
   const i = tr.voters.indexOf(uid);
   let toast;
 
@@ -285,38 +285,22 @@ bot.action(/^like_(.+)$/, async (ctx) => {
 
   // 3. ОБНОВЛЕНИЕ ВСЕХ КОПИЙ
 
-  // 3.1. 🟢 ИСПРАВЛЕНИЕ: Обновление ТЕКУЩЕГО сообщения (предотвращаем дублирование)
-  try {
-    // ИСПОЛЬЗУЕМ ctx.editMessageText для редактирования сообщения, вызвавшего callback
-    await ctx.editMessageText(text, keyboard);
-  } catch (e) {
-    // Игнорируем ошибки: "не модифицировано" или "не найдено"
-    if (!String(e.message).includes('message is not modified') && !String(e.message).includes('message to edit not found')) {
-      console.error('Ошибка обновления текущей кнопки:', e.message);
-    }
-  }
-
-  // 3.2. Обновление остальных ПОСТОЯННЫХ копий (tr.messages)
-  const currentMessageId = ctx.callbackQuery.message?.message_id;
-  
+  // 3.1. Обновление ПОСТОЯННЫХ копий (загруженный трек)
   for (const m of tr.messages || []) {
-    // Пропускаем только что отредактированное сообщение (чтобы не редактировать его дважды)
-    if (m.messageId === currentMessageId) {
-      continue;
-    }
-    
     try {
+      // Пробуем отредактировать текущее сообщение (если это лайк-панель)
       await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
         reply_markup: keyboard.reply_markup
       });
     } catch (e) {
-      // Игнорируем ошибки редактирования
+      // Игнорируем ошибки редактирования (сообщение-аудио, не найдено, не изменено)
     }
   }
-
-  // 3.3. Обновление ВРЕМЕННОЙ лайк-панели (трек из списка) - Логика не меняется
-  const tempState = tempPlays.get(uid);
+  
+  // 3.2. 🟢 ИСПРАВЛЕНИЕ: Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
+  const tempState = tempPlays.get(String(uid));
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
+    // Временная лайк-панель — это обычно последнее сообщение в tempPlays
     const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
     try {
       await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
