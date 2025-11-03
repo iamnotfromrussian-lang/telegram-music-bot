@@ -191,33 +191,66 @@ bot.hears('🏆 Топ за неделю', ctx => {
 // ────────────────────────────────
 // Приём аудио
 // ────────────────────────────────
+// ────────────────────────────────
+// Приём аудио (ИСПРАВЛЕНО)
+// ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
-  try {
-    const file = ctx.message.audio || ctx.message.document;
-    if (!file) return;
+  try {
+    const file = ctx.message.audio || ctx.message.document;
+    if (!file) return;
 
-    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
-    if (exists) {
-      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
-      deleteLater(ctx, warn, 2500);
-      return;
-    }
+    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
+    
+    // 🟢 ИСПРАВЛЕНИЕ: Блокировка дубликатов
+    if (exists) {
+      // 1. Удаляем оригинальное сообщение пользователя с файлом
+      deleteLater(ctx, ctx.message, 100); 
 
-    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
-    const id = `${file.file_unique_id}_${Date.now()}`;
+      // 2. Отправляем предупреждение
+      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
+      deleteLater(ctx, warn, 2500);
+      return;
+    }
 
-    const track = {
-      id,
-      fileId: file.file_id,
-      fileUniqueId: file.file_unique_id,
-      title: safeName,
-      userId: ctx.from.id,
-      voters: [],
-      createdAt: new Date().toISOString(),
-      type: 'original',
-      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
-    };
+    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
+    const id = `${file.file_unique_id}_${Date.now()}`;
 
+    const track = {
+      id,
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      title: safeName,
+      userId: ctx.from.id,
+      voters: [],
+      createdAt: new Date().toISOString(),
+      type: 'original',
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
+    };
+
+    const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
+    deleteLater(ctx, addedMsg, 2000);
+    track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
+
+    const typeMsg = await ctx.reply(
+      'Выбери тип трека:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📀 Оригинальный', `type_${id}_original`)],
+        [Markup.button.callback('🎤 Cover Version', `type_${id}_cover`)]
+      ])
+    );
+    track.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
+
+    const { text, keyboard } = likeBar(track, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    track.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
+
+    trackList.push(track);
+    safeSave();
+  } catch (e) {
+    console.error('audio handler error:', e);
+    ctx.reply('❌ Не удалось обработать файл.').catch(() => {});
+  }
+});
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
@@ -387,6 +420,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
