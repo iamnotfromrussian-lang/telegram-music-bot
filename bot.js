@@ -191,81 +191,33 @@ bot.hears('🏆 Топ за неделю', ctx => {
 // ────────────────────────────────
 // Приём аудио
 // ────────────────────────────────
-// ────────────────────────────────
-// Приём аудио (ИСПРАВЛЕНО)
-// ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
-  try {
-    const file = ctx.message.audio || ctx.message.document;
-    if (!file) return;
+  try {
+    const file = ctx.message.audio || ctx.message.document;
+    if (!file) return;
 
-    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
-    
-   function deleteLater(ctx, msg, delayMs = 1500) {
-  if (!msg) return;
-  
-  // Используем прямые ID, а не весь объект, для большей устойчивости
-  const chatId = msg.chat?.id || ctx.chat.id;
-  const messageId = msg.message_id;
-  
-  if (!chatId || !messageId) return;
+    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
+    if (exists) {
+      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
+      deleteLater(ctx, warn, 2500);
+      return;
+    }
 
-  setTimeout(() => {
-    ctx.telegram.deleteMessage(chatId, messageId).catch((e) => {
-      // Логируем ошибки удаления, чтобы понять причину
-      const errMsg = String(e.message);
-      if (!errMsg.includes('message to delete not found') && !errMsg.includes('message can\'t be deleted')) {
-        console.error(`⚠️ Ошибка удаления сообщения ${messageId}:`, e.message);
-      }
-    });
-  }, delayMs);
-} 
+    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
+    const id = `${file.file_unique_id}_${Date.now()}`;
 
-      // 2. Отправляем предупреждение
-      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
-      deleteLater(ctx, warn, 2500);
-      return;
-    }
+    const track = {
+      id,
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      title: safeName,
+      userId: ctx.from.id,
+      voters: [],
+      createdAt: new Date().toISOString(),
+      type: 'original',
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
+    };
 
-    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
-    const id = `${file.file_unique_id}_${Date.now()}`;
-
-    const track = {
-      id,
-      fileId: file.file_id,
-      fileUniqueId: file.file_unique_id,
-      title: safeName,
-      userId: ctx.from.id,
-      voters: [],
-      createdAt: new Date().toISOString(),
-      type: 'original',
-      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
-    };
-
-    const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
-    deleteLater(ctx, addedMsg, 2000);
-    track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
-
-    const typeMsg = await ctx.reply(
-      'Выбери тип трека:',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('📀 Оригинальный', `type_${id}_original`)],
-        [Markup.button.callback('🎤 Cover Version', `type_${id}_cover`)]
-      ])
-    );
-    track.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
-
-    const { text, keyboard } = likeBar(track, ctx.from.id);
-    const likeMsg = await ctx.reply(text, keyboard);
-    track.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
-
-    trackList.push(track);
-    safeSave();
-  } catch (e) {
-    console.error('audio handler error:', e);
-    ctx.reply('❌ Не удалось обработать файл.').catch(() => {});
-  }
-});
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
@@ -384,71 +336,34 @@ bot.action(/^del_(.+)$/, async (ctx) => {
 });
 
 bot.action(/^play_(.+)$/, async (ctx) => {
-  const id = ctx.match[1];
-  const tr = trackList.find(t => t.id === id);
-  if (!tr) return ctx.answerCbQuery('Не найден');
+  const id = ctx.match[1];
+  const tr = trackList.find(t => t.id === id);
+  if (!tr) return ctx.answerCbQuery('Не найден');
 
-  const uid = String(ctx.from.id);
-  const prev = tempPlays.get(uid);
-  // Удаление предыдущих временных сообщений
-  if (prev && prev.msgIds?.length) {
-    for (const mid of prev.msgIds) {
-      try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
-    }
-    tempPlays.delete(uid);
-  }
+  const uid = String(ctx.from.id);
+  const prev = tempPlays.get(uid);
+  if (prev && prev.msgIds?.length) {
+    for (const mid of prev.msgIds) {
+      try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
+    }
+    tempPlays.delete(uid);
+  }
 
-  const origin = (tr.messages || [])[0];
-  let newIds = [];
+  const origin = (tr.messages || [])[0];
+  let newIds = [];
+  try {
+    if (origin) {
+      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
+      newIds.push(cp.message_id);
+    } else {
+      const fallback = await ctx.reply(`▶️ ${tr.title}`);
+      newIds.push(fallback.message_id);
+    }
+    const { text, keyboard } = likeBar(tr, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    newIds.push(likeMsg.message_id);
+  } catch {}
 
-  try {
-    // Попытка скопировать оригинальный аудиофайл
-    if (origin) {
-      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
-      newIds.push(cp.message_id);
-    } else {
-      // Если нет ссылки на оригинал, отправляем текстовый fallback
-      const fallback = await ctx.reply(`▶️ ${tr.title}`);
-      newIds.push(fallback.message_id);
-    }
-    
-    // Отправка лайк-панели
-    const { text, keyboard } = likeBar(tr, ctx.from.id);
-    const likeMsg = await ctx.reply(text, keyboard);
-    newIds.push(likeMsg.message_id);
-
-  } catch (e) {
-    const errMsg = String(e.message);
-    console.error(`⚠️ Ошибка воспроизведения трека "${tr.title}":`, errMsg);
-    
-    // 🟢 АВТОМАТИЧЕСКОЕ УДАЛЕНИЕ НЕДОСТУПНЫХ ТРЕКОВ
-    if (errMsg.includes('message to copy not found') || errMsg.includes('file_id is invalid')) {
-      const idx = trackList.findIndex(t => t.id === id);
-      if (idx !== -1) {
-        // Удаляем трек из массива
-        trackList.splice(idx, 1);
-        safeSave();
-        
-        // Уведомляем пользователя и обновляем список треков
-        await ctx.answerCbQuery(`🧹 Трек "${tr.title}" удален из списка (исходный файл не найден).`, { show_alert: true });
-        
-        // Обновляем текущую страницу пагинации
-        await refreshPagination(ctx);
-      } else {
-        await ctx.answerCbQuery('❌ Оригинальный аудиофайл удален. Трек недоступен.', { show_alert: true });
-      }
-      
-      return; // Прерываем выполнение после удаления
-    }
-    
-    // Для других ошибок просто уведомляем
-    await ctx.answerCbQuery('❌ Не удалось воспроизвести трек.', { show_alert: true });
-    return;
-  }
-
-  tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
-  await ctx.answerCbQuery();
-});
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
   
 
