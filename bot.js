@@ -260,32 +260,58 @@ bot.action(/^type_(.+)_(original|cover)$/, async (ctx) => {
 });
 
 bot.action(/^like_(.+)$/, async (ctx) => {
-  const id = ctx.match[1];
-  const tr = trackList.find(t => t.id === id);
-  if (!tr) return ctx.answerCbQuery('Не найден');
-  const uid = ctx.from.id;
-  const i = tr.voters.indexOf(uid);
-  let toast;
-  if (i >= 0) {
-    tr.voters.splice(i, 1);
-    toast = await ctx.reply('💤 Лайк снят');
-  } else {
-    tr.voters.push(uid);
-    const eff = await ctx.reply(likeEffect());
-    deleteLater(ctx, eff, 1200);
-    toast = await ctx.reply('🔥 Лайк поставлен');
-  }
-  deleteLater(ctx, toast, 1200);
-  safeSave();
-  for (const m of tr.messages || []) {
-    try {
-      const { text, keyboard } = likeBar(tr, ctx.from.id);
-      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
-        reply_markup: keyboard.reply_markup
-      });
-    } catch {}
-  }
-  await ctx.answerCbQuery();
+  const id = ctx.match[1];
+  const tr = trackList.find(t => t.id === id);
+  if (!tr) return ctx.answerCbQuery('Не найден');
+  const uid = ctx.from.id;
+  const i = tr.voters.indexOf(uid);
+  let toast;
+
+  // 1. Логика добавления/удаления лайка
+  if (i >= 0) {
+    tr.voters.splice(i, 1);
+    toast = await ctx.reply('💤 Лайк снят');
+  } else {
+    tr.voters.push(uid);
+    const eff = await ctx.reply(likeEffect());
+    deleteLater(ctx, eff, 1200);
+    toast = await ctx.reply('🔥 Лайк поставлен');
+  }
+  deleteLater(ctx, toast, 1200);
+  safeSave();
+
+  // 2. Генерируем новый текст и кнопки
+  const { text, keyboard } = likeBar(tr, ctx.from.id);
+
+  // 3. ОБНОВЛЕНИЕ ВСЕХ КОПИЙ
+
+  // 3.1. Обновление ПОСТОЯННЫХ копий (загруженный трек)
+  for (const m of tr.messages || []) {
+    try {
+      // Пробуем отредактировать текущее сообщение (если это лайк-панель)
+      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+    } catch (e) {
+      // Игнорируем ошибки редактирования (сообщение-аудио, не найдено, не изменено)
+    }
+  }
+  
+  // 3.2. 🟢 ИСПРАВЛЕНИЕ: Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
+  const tempState = tempPlays.get(String(uid));
+  if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
+    // Временная лайк-панель — это обычно последнее сообщение в tempPlays
+    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
+    try {
+      await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+    } catch (e) {
+      // Игнорируем ошибки
+    }
+  }
+
+  await ctx.answerCbQuery();
 });
 
 bot.action(/^del_(.+)$/, async (ctx) => {
@@ -339,15 +365,7 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   } catch {}
 
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
-  setTimeout(async () => {
-    const cur = tempPlays.get(uid);
-    if (cur && cur.trackId === tr.id) {
-      for (const mid of cur.msgIds) {
-        try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
-      }
-      tempPlays.delete(uid);
-    }
-  }, 60000);
+  
 
   await ctx.answerCbQuery();
 });
@@ -369,6 +387,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
