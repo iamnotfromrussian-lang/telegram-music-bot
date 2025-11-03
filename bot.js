@@ -67,8 +67,25 @@ const mainMenu = Markup.keyboard([
 ]).resize();
 
 function deleteLater(ctx, msg, delayMs = 1500) {
-  if (!msg) return;
-  setTimeout(() => ctx.telegram.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), delayMs);
+  if (!msg) return;
+  
+  // 1. Явное извлечение Chat ID и Message ID для надежности
+  const chatId = msg.chat?.id || ctx.chat.id;
+  const messageId = msg.message_id;
+  
+  if (!chatId || !messageId) return;
+
+  setTimeout(() => {
+    // 2. Используем явно извлеченные ID
+    ctx.telegram.deleteMessage(chatId, messageId).catch((e) => {
+      const errMsg = String(e.message);
+      // Игнорируем обычные ошибки (например, если сообщение уже удалено)
+      if (!errMsg.includes('message to delete not found')) {
+        // Если вы видите сообщение "message can't be deleted", значит, у бота нет прав.
+        // console.error(`⚠️ Ошибка удаления сообщения ${messageId}:`, e.message);
+      }
+    });
+  }, delayMs);
 }
 
 function likeBar(track, userId) {
@@ -387,6 +404,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
