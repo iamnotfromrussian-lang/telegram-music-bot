@@ -43,6 +43,14 @@ const paginationState = new Map();
 
 // «временные показы» аудио: userId -> { trackId, msgIds: number[] }
 const tempPlays = new Map();
+// состояние пагинации: userId -> { key, page }
+const paginationState = new Map();
+
+// «временные показы» аудио: userId -> { trackId, msgIds: number[] }
+const tempPlays = new Map();
+
+// 🟢 НУЖНО ДОБАВИТЬ: Сообщения со списками: userId -> messageId[]
+const listMsgHistory = new Map();
 
 // ────────────────────────────────
 // Веб-сервер (для Render health check)
@@ -107,40 +115,23 @@ function pickListByKey(key, userId) {
   }
 }
 
-async function showTracks(ctx, list, title, page = 1) {
-  const perPage = 10;
-  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
-  page = Math.min(Math.max(1, page), totalPages);
-
-  const key = getListKey(title);
-  paginationState.set(String(ctx.from.id), { key, page });
-
-  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
-
-  const start = (page - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
-
-  // 🟢 ИСПРАВЛЕНО: Ограничение длины и перенос лайков в начало
-  const MAX_TITLE_LENGTH = 35; 
-  
-  const buttons = slice.map(t => {
-    let displayTitle = t.title;
-    if (displayTitle.length > MAX_TITLE_LENGTH) {
-      displayTitle = displayTitle.substring(0, MAX_TITLE_LENGTH).trim() + '...';
-    }
-    // Новый формат: ❤️ [Лайки] • ▶️ [Название]
-    const buttonText = `❤️ ${t.voters.length} • ▶️ ${displayTitle}`; 
-    return [Markup.button.callback(buttonText, `play_${t.id}`)];
-  });
-  
-  // Логика навигации
-  const nav = [];
-  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
-  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
-  if (nav.length) buttons.push(nav);
-
+// ...
+// ...
   const header = `${title} (стр. ${page}/${totalPages})`;
-  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
+  
+  // 🛑 ИСПРАВЛЕНИЕ: Отправляем новый список и сохраняем его ID
+  const newListMsg = await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
+  
+  const uid = String(ctx.from.id);
+  const oldListIds = listMsgHistory.get(uid) || [];
+  
+  // Удаляем предыдущие сообщения списков
+  for (const mid of oldListIds) {
+    ctx.telegram.deleteMessage(newListMsg.chat.id, mid).catch(() => {});
+  }
+  
+  // Сохраняем ID нового сообщения
+  listMsgHistory.set(uid, [newListMsg.message_id]);
 }
   
 // ...
@@ -337,32 +328,39 @@ bot.action(/^del_(.+)$/, async (ctx) => {
   if (idx === -1) return ctx.answerCbQuery('Не найден');
   const tr = trackList[idx];
 
-  // 1. УДАЛЕНИЕ ПОСТОЯННЫХ СООБЩЕНИЙ
-  // Идем с конца, чтобы удалить сначала лайк-панель, тип, "добавлен", и т.д.
+  // 1. УДАЛЕНИЕ ПОСТОЯННЫХ СООБЩЕНИЙ (кроме оригинального аудио)
   for (let i = (tr.messages?.length || 0) - 1; i > 0; i--) { 
-    // Начинаем с 1, чтобы избежать удаления tr.messages[0] (оригинальное аудио)
     const m = tr.messages[i];
     await ctx.telegram.deleteMessage(m.chatId, m.messageId).catch(() => {});
   }
 
-  // 2. УДАЛЕНИЕ ВРЕМЕННЫХ СООБЩЕНИЙ (если трек сейчас проигрывается у кого-то)
-  // Итерируемся по всем текущим play-сессиям
+  // 2. УДАЛЕНИЕ ВРЕМЕННЫХ СООБЩЕНИЙ (play-сессий)
   for (const [uid, state] of tempPlays.entries()) {
     if (state.trackId === id && state.msgIds?.length) {
       for (const mid of state.msgIds) {
         await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => {});
       }
-      tempPlays.delete(uid); // Удаляем сессию из мапы
+      tempPlays.delete(uid);
     }
   }
+    
+  // 3. УДАЛЕНИЕ СТАРОЙ ИСТОРИИ СООБЩЕНИЙ СО СПИСКАМИ (чтобы не показывать мертвый трек)
+  const uid = String(ctx.from.id);
+  const listIds = listMsgHistory.get(uid) || [];
+  for (const mid of listIds) {
+    await ctx.telegram.deleteMessage(ctx.chat.id, mid).catch(() => {});
+  }
+  listMsgHistory.delete(uid); // Удаляем историю после чистки
 
-
+  // 4. Удаление трека из хранилища
   trackList.splice(idx, 1);
   safeSave();
 
   const info = await ctx.reply(`🧹 Трек "${tr.title}" удалён.`);
   deleteLater(ctx, info, 1800);
-  await refreshPagination(ctx);
+  
+  // 5. Обновление: Отправляем новый, чистый список
+  await refreshPagination(ctx); 
   await ctx.answerCbQuery('Удалено');
 });
 
@@ -418,6 +416,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
