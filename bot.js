@@ -299,11 +299,11 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
   const tr = findTrackAndCheck(ctx, id);
   if (!tr) return;
-  
+  
   const uid = String(ctx.from.id);
   const i = tr.voters.indexOf(uid);
   let toast;
-  
+  
   // Логика добавления/удаления лайка
   if (i >= 0) {
     tr.voters.splice(i, 1);
@@ -316,6 +316,65 @@ bot.action(/^like_(.+)$/, async (ctx) => {
   }
   deleteLater(ctx, toast, 1200);
   safeSave();
+  
+  // 1. Генерируем новый текст и кнопки
+  const { text, keyboard } = likeBar(tr, ctx.from.id);
+  
+  // 2. 🟢 ИСПРАВЛЕНИЕ: Обновляем именно то сообщение, на которое пользователь нажал
+  try {
+    if (ctx.callbackQuery.message) {
+      // ctx.editMessageText — самый надежный метод для обновления текущего сообщения
+      await ctx.editMessageText(text, keyboard);
+    }
+  } catch (e) {
+    // Игнорируем ошибки, связанные с тем, что сообщение уже изменено или не найдено
+    const errMsg = String(e.message);
+    if (!errMsg.includes('message to edit not found') && !errMsg.includes('message is not modified')) {
+      console.error('Ошибка обновления кнопки на текущем сообщении:', e.message);
+    }
+  }
+  
+  // 3. Обновление остальных ПОСТОЯННЫХ копий (для других чатов)
+  const updatedMessages = [];
+  for (const m of tr.messages || []) {
+    // Пропускаем только что отредактированное сообщение
+    if (ctx.callbackQuery.message && m.messageId === ctx.callbackQuery.message.message_id) {
+      updatedMessages.push(m);
+      continue;
+    }
+    try {
+      await ctx.telegram.editMessageText(m.chatId, m.messageId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+      updatedMessages.push(m);
+    } catch (e) {
+      const errMsg = String(e.message);
+      if (errMsg.includes('message is not a text message')) {
+        updatedMessages.push(m); 
+      } else if (!errMsg.includes('message to edit not found') && !errMsg.includes('message is not modified')) {
+        console.error('Ошибка обновления копии лайк-панели:', e.message);
+        updatedMessages.push(m); 
+      }
+    }
+  }
+  tr.messages = updatedMessages;
+  
+  // 4. Обновление ВРЕМЕННЫХ лайк-панелей (если проигрывается)
+  const tempState = tempPlays.get(uid);
+  if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
+    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
+    try {
+      await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
+        reply_markup: keyboard.reply_markup
+      });
+    } catch (e) {
+      if (!String(e.message).includes('message to edit not found')) {
+        console.error('Ошибка обновления временной лайк-панели:', e.message);
+      }
+    }
+  }
+  await ctx.answerCbQuery();
+});
   
   // 1. 🟢 ИСПРАВЛЕНИЕ 2: Устойчивое обновление ПОСТОЯННЫХ лайк-панелей (tr.messages)
   const { text, keyboard } = likeBar(tr, ctx.from.id);
@@ -440,6 +499,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
