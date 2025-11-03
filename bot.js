@@ -125,28 +125,39 @@ function pickListByKey(key, userId) {
 }
 
 async function showTracks(ctx, list, title, page = 1) {
-  const perPage = 10;
-  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
-  page = Math.min(Math.max(1, page), totalPages);
+  const perPage = 10;
+  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+  page = Math.min(Math.max(1, page), totalPages);
 
-  const key = getListKey(title);
-  paginationState.set(String(ctx.from.id), { key, page });
+  const key = getListKey(title);
+  paginationState.set(String(ctx.from.id), { key, page });
 
-  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
+  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
 
-  const start = (page - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
+  const start = (page - 1) * perPage;
+  const slice = list.slice(start, start + perPage);
 
-  const buttons = slice.map(t => [Markup.button.callback(`▶️ ${t.title} • ❤️ ${t.voters.length}`, `play_${t.id}`)]);
-  const nav = [];
-  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
-  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
-  if (nav.length) buttons.push(nav);
+  // 🟢 ИСПРАВЛЕНИЕ: Ограничиваем длину названия трека, чтобы счетчик лайков был виден
+  const MAX_TITLE_LENGTH = 35; // Можно скорректировать это число
+  
+  const buttons = slice.map(t => {
+    let displayTitle = t.title;
+    if (displayTitle.length > MAX_TITLE_LENGTH) {
+      displayTitle = displayTitle.substring(0, MAX_TITLE_LENGTH).trim() + '...';
+    }
+    // Формат кнопки: ▶️ [Название] ... • ❤️ [Лайки]
+    const buttonText = `▶️ ${displayTitle} • ❤️ ${t.voters.length}`;
+    return [Markup.button.callback(buttonText, `play_${t.id}`)];
+  });
+  
+  const nav = [];
+  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
+  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
+  if (nav.length) buttons.push(nav);
 
-  const header = `${title} (стр. ${page}/${totalPages})`;
-  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
+  const header = `${title} (стр. ${page}/${totalPages})`;
+  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
 }
-
 async function refreshPagination(ctx) {
   const state = paginationState.get(String(ctx.from.id));
   if (!state) return;
@@ -404,6 +415,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
