@@ -67,25 +67,8 @@ const mainMenu = Markup.keyboard([
 ]).resize();
 
 function deleteLater(ctx, msg, delayMs = 1500) {
-  if (!msg) return;
-  
-  // 1. Явное извлечение Chat ID и Message ID для надежности
-  const chatId = msg.chat?.id || ctx.chat.id;
-  const messageId = msg.message_id;
-  
-  if (!chatId || !messageId) return;
-
-  setTimeout(() => {
-    // 2. Используем явно извлеченные ID
-    ctx.telegram.deleteMessage(chatId, messageId).catch((e) => {
-      const errMsg = String(e.message);
-      // Игнорируем обычные ошибки (например, если сообщение уже удалено)
-      if (!errMsg.includes('message to delete not found')) {
-        // Если вы видите сообщение "message can't be deleted", значит, у бота нет прав.
-        // console.error(`⚠️ Ошибка удаления сообщения ${messageId}:`, e.message);
-      }
-    });
-  }, delayMs);
+  if (!msg) return;
+  setTimeout(() => ctx.telegram.deleteMessage(msg.chat.id, msg.message_id).catch(() => {}), delayMs);
 }
 
 function likeBar(track, userId) {
@@ -125,39 +108,28 @@ function pickListByKey(key, userId) {
 }
 
 async function showTracks(ctx, list, title, page = 1) {
-  const perPage = 10;
-  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
-  page = Math.min(Math.max(1, page), totalPages);
+  const perPage = 10;
+  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+  page = Math.min(Math.max(1, page), totalPages);
 
-  const key = getListKey(title);
-  paginationState.set(String(ctx.from.id), { key, page });
+  const key = getListKey(title);
+  paginationState.set(String(ctx.from.id), { key, page });
 
-  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
+  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
 
-  const start = (page - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
+  const start = (page - 1) * perPage;
+  const slice = list.slice(start, start + perPage);
 
-  // 🟢 ИСПРАВЛЕНИЕ: Ограничиваем длину названия трека, чтобы счетчик лайков был виден
-  const MAX_TITLE_LENGTH = 35; // Можно скорректировать это число
-  
-  const buttons = slice.map(t => {
-    let displayTitle = t.title;
-    if (displayTitle.length > MAX_TITLE_LENGTH) {
-      displayTitle = displayTitle.substring(0, MAX_TITLE_LENGTH).trim() + '...';
-    }
-    // Формат кнопки: ▶️ [Название] ... • ❤️ [Лайки]
-    const buttonText = `▶️ ${displayTitle} • ❤️ ${t.voters.length}`;
-    return [Markup.button.callback(buttonText, `play_${t.id}`)];
-  });
-  
-  const nav = [];
-  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
-  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
-  if (nav.length) buttons.push(nav);
+  const buttons = slice.map(t => [Markup.button.callback(`▶️ ${t.title} • ❤️ ${t.voters.length}`, `play_${t.id}`)]);
+  const nav = [];
+  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
+  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
+  if (nav.length) buttons.push(nav);
 
-  const header = `${title} (стр. ${page}/${totalPages})`;
-  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
+  const header = `${title} (стр. ${page}/${totalPages})`;
+  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
 }
+
 async function refreshPagination(ctx) {
   const state = paginationState.get(String(ctx.from.id));
   if (!state) return;
@@ -219,81 +191,33 @@ bot.hears('🏆 Топ за неделю', ctx => {
 // ────────────────────────────────
 // Приём аудио
 // ────────────────────────────────
-// ────────────────────────────────
-// Приём аудио (ДИАГНОСТИКА УДАЛЕНИЯ)
-// ────────────────────────────────
-// ────────────────────────────────
-// Приём аудио (ВОССТАНОВЛЕНИЕ + ДИАГНОСТИКА ДУБЛИКАТОВ)
-// ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
-  try {
-    const file = ctx.message.audio || ctx.message.document;
-    if (!file) return;
+  try {
+    const file = ctx.message.audio || ctx.message.document;
+    if (!file) return;
 
-    // 🟢 ДИАГНОСТИКА: Проверяем, какой ID мы ищем
-    // console.log(`[DUPLICATE CHECK] File ID: ${file.file_id}, Unique ID: ${file.file_unique_id}`);
+    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
+    if (exists) {
+      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
+      deleteLater(ctx, warn, 2500);
+      return;
+    }
 
-    const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
-    
-    // 🛑 КРИТИЧЕСКАЯ ПРОВЕРКА ДУБЛИКАТА
-    if (exists) {
-        
-        // 1. Пытаемся удалить сообщение пользователя (без задержки, чтобы избежать дублирования в списке)
-        try {
-            await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id);
-            // console.log('✅ DUPLICATE: Original message deleted.');
-        } catch (e) {
-            // Если не удается, просто игнорируем ошибку (вероятно, из-за прав)
-            // console.error('❌ DUPLICATE: Failed to delete user message:', e.message);
-        }
-        
-        // 2. Отправляем предупреждение (с временным удалением)
-        const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
-        deleteLater(ctx, warn, 2500); 
-        return;
-    }
+    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
+    const id = `${file.file_unique_id}_${Date.now()}`;
 
-    // --- Логика добавления нового трека (без изменений) ---
+    const track = {
+      id,
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      title: safeName,
+      userId: ctx.from.id,
+      voters: [],
+      createdAt: new Date().toISOString(),
+      type: 'original',
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
+    };
 
-    const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
-    const id = `${file.file_unique_id}_${Date.now()}`;
-
-    const track = {
-      id,
-      fileId: file.file_id,
-      fileUniqueId: file.file_unique_id,
-      title: safeName,
-      userId: ctx.from.id,
-      voters: [],
-      createdAt: new Date().toISOString(),
-      type: 'original',
-      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
-    };
-
-    const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
-    deleteLater(ctx, addedMsg, 2000);
-    track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
-
-    const typeMsg = await ctx.reply(
-      'Выбери тип трека:',
-      Markup.inlineKeyboard([
-        [Markup.button.callback('📀 Оригинальный', `type_${id}_original`)],
-        [Markup.button.callback('🎤 Cover Version', `type_${id}_cover`)]
-      ])
-    );
-    track.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
-
-    const { text, keyboard } = likeBar(track, ctx.from.id);
-    const likeMsg = await ctx.reply(text, keyboard);
-    track.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
-
-    trackList.push(track);
-    safeSave();
-  } catch (e) {
-    console.error('audio handler error:', e);
-    ctx.reply('❌ Не удалось обработать файл.').catch(() => {});
-  }
-});
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
@@ -358,21 +282,8 @@ bot.action(/^like_(.+)$/, async (ctx) => {
 
   // 2. Генерируем новый текст и кнопки
   const { text, keyboard } = likeBar(tr, ctx.from.id);
-  
-  // 🛑 ИСПРАВЛЕНИЕ ДУБЛИРОВАНИЯ: Приоритетное редактирование сообщения, на которое кликнули
-  try {
-    // Редактируем текст и кнопки кликнутого сообщения.
-    await ctx.editMessageText(text, { reply_markup: keyboard.reply_markup });
-  } catch (e) {
-    // Если не удалось отредактировать текст (например, сообщение аудиофайл), пробуем изменить только кнопки.
-    try {
-      await ctx.editMessageReplyMarkup(keyboard.reply_markup);
-    } catch (e2) {
-      // Игнорируем ошибку, если сообщение уже удалено или нередактируемо
-    }
-  }
 
-  // 3. ОБНОВЛЕНИЕ ВСЕХ ОСТАЛЬНЫХ КОПИЙ
+  // 3. ОБНОВЛЕНИЕ ВСЕХ КОПИЙ
 
   // 3.1. Обновление ПОСТОЯННЫХ копий (загруженный трек)
   for (const m of tr.messages || []) {
@@ -382,15 +293,15 @@ bot.action(/^like_(.+)$/, async (ctx) => {
         reply_markup: keyboard.reply_markup
       });
     } catch (e) {
-      // Игнорируем ошибки редактирования
+      // Игнорируем ошибки редактирования (сообщение-аудио, не найдено, не изменено)
     }
   }
-  
-  // 3.2. Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
+  
+  // 3.2. 🟢 ИСПРАВЛЕНИЕ: Обновление ВРЕМЕННОЙ лайк-панели (трек из списка)
   const tempState = tempPlays.get(String(uid));
   if (tempState && tempState.trackId === id && tempState.msgIds && tempState.msgIds.length > 1) {
     // Временная лайк-панель — это обычно последнее сообщение в tempPlays
-    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
+    const likeMsgId = tempState.msgIds[tempState.msgIds.length - 1]; 
     try {
       await ctx.telegram.editMessageText(ctx.chat.id, likeMsgId, undefined, text, {
         reply_markup: keyboard.reply_markup
