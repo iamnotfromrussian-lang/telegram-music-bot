@@ -7,15 +7,19 @@
     "start": "node bot.js"
   },
   "dependencies": {
-    "@napi-rs/canvas": "^0.1.80",
-    "dotenv": "^17.2.3",
-    "express": "^4.21.2",
-    "fluent-ffmpeg": "^2.1.3",
-    "music-metadata": "^11.9.0",
-    "node-fetch": "^3.3.2",
-    "sanitize-filename": "^1.6.3",
-    "sqlite": "^5.1.1",
-    "telegraf": "^4.16.3",
-    "mongoose": "^8.0.0" 🛑 // ДОБАВЛЕНО!
-  },
+    "@napi-rs/canvas": "^0.1.80",
+    "dotenv": "^17.2.3",
+    "express": "^4.21.2",
+    "fluent-ffmpeg": "^2.1.3",
+    "music-metadata": "^11.9.0",
+    "node-fetch": "^3.3.2",
+    "sanitize-filename": "^1.6.3",
+    "sqlite": "^5.1.1",
+    "telegraf": "^4.16.3",
+    "mongoose": "^8.0.0"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.10"
+  }
+}
 
