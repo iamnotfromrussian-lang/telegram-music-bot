@@ -94,7 +94,11 @@ function deleteLater(ctx, msg, delayMs = 1500) {
 function likeBar(track, userId) {
   // При использовании агрегации MongoDB возвращает voteCount, а не voters.length.
   // Мы используем оператор "?." для безопасного доступа.
-  const voteCount = track.voters?.length ?? track.voteCount ?? 0;
+  function likeBar(track, userId) {
+  // 🛑 ИСПРАВЛЕНИЕ: Явная проверка на наличие поля voteCount (из агрегации), иначе используем длину массива.
+  const voteCount = track.voteCount !== undefined ? track.voteCount : (track.voters?.length ?? 0);
+  const liked = track.voters?.includes(userId);
+// ... остальной код
   const liked = track.voters?.includes(userId);
   const text = `❤️ ${voteCount} — ${track.title}`;
   const row = [Markup.button.callback(liked ? '💔 Убрать лайк' : '❤️ Поставить лайк', `like_${track.id}`)];
@@ -424,19 +428,17 @@ bot.action(/^del_(.+)$/, async (ctx) => {
 
 bot.action(/^play_(.+)$/, async (ctx) => {
   const id = ctx.match[1];
-  // 🛑 ИСПРАВЛЕНИЕ: Поиск трека по ID в БД
+  // 🛑 ИСПРАВЛЕНИЕ: Используем только findOne для получения полноценного документа.
   const tr = await TrackModel.findOne({ id }); 
   if (!tr) {
-    // Если трек не найден через findOne, попробуем найти его в результате агрегации
-    const aggResult = await TrackModel.aggregate([{ $match: { id: id } }]);
-    if (aggResult.length === 0) return ctx.answerCbQuery('Не найден');
-    tr = aggResult[0];
+    // Это произойдет, если пользователь нажал на кнопку старого, удаленного трека
+    return ctx.answerCbQuery('❌ Трек не найден (возможно, он был удален).'); 
   }
-  // const tr = await TrackModel.findOne({ id }); 
-  // if (!tr) return ctx.answerCbQuery('Не найден'); // ❌ Убрали эту строку, так как агрегация возвращает plain object
 
   const uid = String(ctx.from.id);
   const prev = tempPlays.get(uid);
+  
+  // Удаление предыдущего сообщения "Play"
   if (prev && prev.msgIds?.length) {
     for (const mid of prev.msgIds) {
       try { await ctx.telegram.deleteMessage(ctx.chat.id, mid); } catch {}
@@ -448,21 +450,24 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   let newIds = [];
   try {
     if (origin) {
+      // Копируем оригинальный аудиофайл
       const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
       newIds.push(cp.message_id);
     } else {
+      // Запасной вариант
       const fallback = await ctx.reply(`▶️ ${tr.title}`);
       newIds.push(fallback.message_id);
     }
-    // 🛑 ИСПРАВЛЕНИЕ: Используем tr, полученный агрегацией, для likeBar
+    
+    // Используем likeBar с актуальным документом
     const { text, keyboard } = likeBar(tr, ctx.from.id); 
     const likeMsg = await ctx.reply(text, keyboard);
     newIds.push(likeMsg.message_id);
-  } catch {}
+  } catch (e) {
+    console.error('Play action error:', e);
+  }
 
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
-  
-
   await ctx.answerCbQuery();
 });
 
@@ -490,6 +495,7 @@ startBot(); // 🛑 Запускаем асинхронную функцию sta
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
