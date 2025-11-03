@@ -398,19 +398,42 @@ bot.action(/^play_(.+)$/, async (ctx) => {
   }
 
   const origin = (tr.messages || [])[0];
-  let newIds = [];
-  try {
-    if (origin) {
-      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
-      newIds.push(cp.message_id);
-    } else {
-      const fallback = await ctx.reply(`▶️ ${tr.title}`);
-      newIds.push(fallback.message_id);
-    }
-    const { text, keyboard } = likeBar(tr, ctx.from.id);
-    const likeMsg = await ctx.reply(text, keyboard);
-    newIds.push(likeMsg.message_id);
-  } catch {}
+  let newIds = [];
+  try {
+    if (origin) {
+      const cp = await ctx.telegram.copyMessage(ctx.chat.id, origin.chatId, origin.messageId, { caption: tr.title });
+      newIds.push(cp.message_id);
+    } else {
+      // Fallback-сообщение, если нет ссылки на оригинал
+      const fallback = await ctx.reply(`▶️ ${tr.title}`);
+      newIds.push(fallback.message_id);
+    }
+    
+    // Отправка лайк-панели (выполняется только при успешном копировании/fallback)
+    const { text, keyboard } = likeBar(tr, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    newIds.push(likeMsg.message_id);
+
+  } catch (e) {
+    // 🟢 ИСПРАВЛЕНИЕ: Логируем ошибку и уведомляем пользователя
+    const errMsg = String(e.message);
+    console.error(`⚠️ Ошибка воспроизведения трека "${tr.title}":`, errMsg);
+
+    if (errMsg.includes('message to copy not found')) {
+      // Пользователь увидит: "Оригинальный аудиофайл удален."
+      ctx.answerCbQuery('❌ Оригинальный аудиофайл удален. Трек недоступен.', { show_alert: true }).catch(() => {});
+    } else {
+      // Пользователь увидит: "Не удалось воспроизвести трек."
+      ctx.answerCbQuery('❌ Не удалось воспроизвести трек.', { show_alert: true }).catch(() => {});
+    }
+    
+    // Важно: если произошла ошибка, мы прерываем выполнение.
+    return; 
+  }
+
+  tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
+  await ctx.answerCbQuery();
+});
 
   tempPlays.set(uid, { trackId: tr.id, msgIds: newIds });
   
@@ -435,6 +458,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
