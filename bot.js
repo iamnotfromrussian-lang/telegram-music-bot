@@ -92,18 +92,14 @@ function deleteLater(ctx, msg, delayMs = 1500) {
 }
 
 function likeBar(track, userId) {
-  // При использовании агрегации MongoDB возвращает voteCount, а не voters.length.
-  // Мы используем оператор "?." для безопасного доступа.
-  function likeBar(track, userId) {
   // 🛑 ИСПРАВЛЕНИЕ: Явная проверка на наличие поля voteCount (из агрегации), иначе используем длину массива.
   const voteCount = track.voteCount !== undefined ? track.voteCount : (track.voters?.length ?? 0);
-  const liked = track.voters?.includes(userId);
-// ... остальной код
   const liked = track.voters?.includes(userId);
   const text = `❤️ ${voteCount} — ${track.title}`;
   const row = [Markup.button.callback(liked ? '💔 Убрать лайк' : '❤️ Поставить лайк', `like_${track.id}`)];
   if (isAdmin(userId)) row.push(Markup.button.callback('🗑 Удалить', `del_${track.id}`));
   return { text, keyboard: Markup.inlineKeyboard([row]) };
+}
 }
 
 // ────────────────────────────────
@@ -495,6 +491,7 @@ startBot(); // 🛑 Запускаем асинхронную функцию sta
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
