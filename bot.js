@@ -108,24 +108,19 @@ function pickListByKey(key, userId) {
 }
 
 async function showTracks(ctx, list, title, page = 1) {
-  const perPage = 10;
-  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
-  page = Math.min(Math.max(1, page), totalPages);
+  const perPage = 10;
+  const totalPages = Math.max(1, Math.ceil(list.length / perPage));
+  page = Math.min(Math.max(1, page), totalPages);
 
-  const key = getListKey(title);
-  paginationState.set(String(ctx.from.id), { key, page });
+  const key = getListKey(title);
+  paginationState.set(String(ctx.from.id), { key, page });
 
-  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
-
-  const start = (page - 1) * perPage;
-  const slice = list.slice(start, start + perPage);
-
-  // ... внутри async function showTracks(ctx, list, title, page = 1)
+  if (!list.length) return ctx.reply('Список пуст.', mainMenu);
 
   const start = (page - 1) * perPage;
   const slice = list.slice(start, start + perPage);
 
-  // Ограничение длины названия трека (было 35 символов)
+  // 🟢 ИСПРАВЛЕНО: Ограничение длины и перенос лайков в начало
   const MAX_TITLE_LENGTH = 35; 
   
   const buttons = slice.map(t => {
@@ -133,10 +128,20 @@ async function showTracks(ctx, list, title, page = 1) {
     if (displayTitle.length > MAX_TITLE_LENGTH) {
       displayTitle = displayTitle.substring(0, MAX_TITLE_LENGTH).trim() + '...';
     }
-    // 🟢 ИСПРАВЛЕНО: Новый формат кнопки: ❤️ [Лайки] • ▶️ [Название]
+    // Новый формат: ❤️ [Лайки] • ▶️ [Название]
     const buttonText = `❤️ ${t.voters.length} • ▶️ ${displayTitle}`; 
     return [Markup.button.callback(buttonText, `play_${t.id}`)];
   });
+  
+  // Логика навигации
+  const nav = [];
+  if (page > 1) nav.push(Markup.button.callback('⬅️ Назад', `page_${key}_${page - 1}`));
+  if (page < totalPages) nav.push(Markup.button.callback('➡️ Далее', `page_${key}_${page + 1}`));
+  if (nav.length) buttons.push(nav);
+
+  const header = `${title} (стр. ${page}/${totalPages})`;
+  await ctx.reply(header, Markup.inlineKeyboard(buttons, { columns: 1 }));
+}
   
 // ...
 
@@ -397,6 +402,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
