@@ -222,44 +222,70 @@ bot.hears('🏆 Топ за неделю', ctx => {
 // ────────────────────────────────
 // Приём аудио (ДИАГНОСТИКА УДАЛЕНИЯ)
 // ────────────────────────────────
+// ────────────────────────────────
+// Приём аудио (ВОССТАНОВЛЕНИЕ + ДИАГНОСТИКА ДУБЛИКАТОВ)
+// ────────────────────────────────
 bot.on(['audio', 'document'], async (ctx) => {
   try {
     const file = ctx.message.audio || ctx.message.document;
     if (!file) return;
 
+    // 🟢 ДИАГНОСТИКА: Проверяем, какой ID мы ищем
+    // console.log(`[DUPLICATE CHECK] File ID: ${file.file_id}, Unique ID: ${file.file_unique_id}`);
+
     const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
     
+    // 🛑 КРИТИЧЕСКАЯ ПРОВЕРКА ДУБЛИКАТА
     if (exists) {
-      // 🛑 ДИАГНОСТИКА: Пытаемся удалить сообщение пользователя СРАЗУ и ЛОГИРУЕМ ошибку
-      try {
-        await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id); 
-        console.log('✅ УДАЛЕНИЕ: Сообщение пользователя успешно удалено.');
-      } catch (e) {
-        // Если удаление не удалось, ошибка будет здесь
-        console.error('❌ ОШИБКА УДАЛЕНИЯ: Не удалось удалить сообщение пользователя:', e.message); 
-        // Типичные ошибки: 'message can\'t be deleted' (нет прав) или 'message to delete not found' (редко)
-      }
-
-      // Отправляем предупреждение и удаляем его через 2.5 сек (используем вашу старую deleteLater)
-      const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
-      deleteLater(ctx, warn, 2500); 
-      return;
+        
+        // 1. Пытаемся удалить сообщение пользователя (без задержки, чтобы избежать дублирования в списке)
+        try {
+            await ctx.telegram.deleteMessage(ctx.chat.id, ctx.message.message_id);
+            // console.log('✅ DUPLICATE: Original message deleted.');
+        } catch (e) {
+            // Если не удается, просто игнорируем ошибку (вероятно, из-за прав)
+            // console.error('❌ DUPLICATE: Failed to delete user message:', e.message);
+        }
+        
+        // 2. Отправляем предупреждение (с временным удалением)
+        const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
+        deleteLater(ctx, warn, 2500); 
+        return;
     }
 
-    // ... (Остальная логика добавления нового трека без изменений)
-    
+    // --- Логика добавления нового трека (без изменений) ---
+
     const safeName = (file.file_name || `track_${Date.now()}.mp3`).replace(/[\\/:*?"<>|]+/g, '_');
     const id = `${file.file_unique_id}_${Date.now()}`;
 
     const track = {
-      // ... (объект track)
+      id,
+      fileId: file.file_id,
+      fileUniqueId: file.file_unique_id,
+      title: safeName,
+      userId: ctx.from.id,
+      voters: [],
+      createdAt: new Date().toISOString(),
+      type: 'original',
+      messages: [{ chatId: ctx.chat.id, messageId: ctx.message.message_id }]
     };
 
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
 
-    // ... (отправка typeMsg и likeMsg)
+    const typeMsg = await ctx.reply(
+      'Выбери тип трека:',
+      Markup.inlineKeyboard([
+        [Markup.button.callback('📀 Оригинальный', `type_${id}_original`)],
+        [Markup.button.callback('🎤 Cover Version', `type_${id}_cover`)]
+      ])
+    );
+    track.messages.push({ chatId: typeMsg.chat.id, messageId: typeMsg.message_id });
+
+    const { text, keyboard } = likeBar(track, ctx.from.id);
+    const likeMsg = await ctx.reply(text, keyboard);
+    track.messages.push({ chatId: likeMsg.chat.id, messageId: likeMsg.message_id });
 
     trackList.push(track);
     safeSave();
@@ -268,7 +294,6 @@ bot.on(['audio', 'document'], async (ctx) => {
     ctx.reply('❌ Не удалось обработать файл.').catch(() => {});
   }
 });
-
     const addedMsg = await ctx.reply(`✅ Трек добавлен: ${safeName}`);
     deleteLater(ctx, addedMsg, 2000);
     track.messages.push({ chatId: addedMsg.chat.id, messageId: addedMsg.message_id });
@@ -438,6 +463,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
