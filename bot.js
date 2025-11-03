@@ -201,10 +201,25 @@ bot.on(['audio', 'document'], async (ctx) => {
 
     const exists = trackList.some(t => t.fileId === file.file_id || t.fileUniqueId === file.file_unique_id);
     
-    // 🟢 ИСПРАВЛЕНИЕ: Блокировка дубликатов
-    if (exists) {
-      // 1. Удаляем оригинальное сообщение пользователя с файлом
-      deleteLater(ctx, ctx.message, 100); 
+   function deleteLater(ctx, msg, delayMs = 1500) {
+  if (!msg) return;
+  
+  // Используем прямые ID, а не весь объект, для большей устойчивости
+  const chatId = msg.chat?.id || ctx.chat.id;
+  const messageId = msg.message_id;
+  
+  if (!chatId || !messageId) return;
+
+  setTimeout(() => {
+    ctx.telegram.deleteMessage(chatId, messageId).catch((e) => {
+      // Логируем ошибки удаления, чтобы понять причину
+      const errMsg = String(e.message);
+      if (!errMsg.includes('message to delete not found') && !errMsg.includes('message can\'t be deleted')) {
+        console.error(`⚠️ Ошибка удаления сообщения ${messageId}:`, e.message);
+      }
+    });
+  }, delayMs);
+} 
 
       // 2. Отправляем предупреждение
       const warn = await ctx.reply('⚠️ Такой трек уже есть в списке.');
@@ -420,6 +435,7 @@ bot.catch(err => {
 bot.launch().then(() => console.log('🤖 Бот запущен и готов'));
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+
 
 
 
